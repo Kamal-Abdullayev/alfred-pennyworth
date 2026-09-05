@@ -28,7 +28,7 @@ export type Turn = {
   est_cost_usd: number; tools: string[]; text_chars: number; created_at: number
 }
 export type ChainDetail = {
-  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]
+  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]; code_links: CodeLink[]
   diff: string | null; log: string | null; branch: string; status: string; kind: Kind; cost_usd: number
 }
 
@@ -36,7 +36,9 @@ export type ChainDetail = {
 export type Subtask = { id: string; title: string; description: string; acceptance: string[]; depends_on: string[] }
 export type Plan = { summary: string; parallelism: number; subtasks: Subtask[] }
 export type CodeRef = { path: string; start_line: number; end_line: number; symbol: string | null; language: string; snippet: string; why: string }
-export type Source = { repo_path: string; branch: string | null; commit: string | null }
+export type Source = { repo_path: string | null; gitlab_project?: string | null; branch: string | null; commit: string | null }
+export type CodeLink = { path: string; abs: string | null; exists: boolean; idea: string | null; web: string | null }
+export type FlowRow = { ts: string; role: string; action: string; task: string; detail: string }
 export type Citation = { source: string; ref: string; url: string | null }
 export type Answer = { answer: string; code: CodeRef[]; source: Source; citations: Citation[]; confidence: 'low' | 'medium' | 'high' }
 export type LeadOutput = { kind: Kind; plan: Plan | null; answer: Answer | null }
@@ -50,11 +52,6 @@ export function leadOutput(structured: unknown): LeadOutput | null {
   return null
 }
 
-/** Absolute path of a code reference, and the IntelliJ deep link for it. */
-export function codeRefPath(src: Source, ref: CodeRef) {
-  const abs = `${src.repo_path.replace(/\/$/, '')}/${ref.path.replace(/^\//, '')}`
-  return { abs, idea: `idea://open?file=${encodeURIComponent(abs)}&line=${ref.start_line}` }
-}
 export type Agent = {
   role: string; name: string; model: string; contract: string; permission_mode: string
   max_minutes: number; max_turns: number | null; builtin_tools: string[]; allowed_tools: string[]
@@ -71,17 +68,23 @@ export type UsageSummary = {
 }
 export type FieldState = { secret: boolean; set: boolean; value?: string | null }
 export type ConnectorTool = { connector: string; tool: string; description: string | null; mutates: number; source: 'annotation' | 'heuristic' | 'user' }
+export type LogEntry = { id: number; connector: string; level: 'info' | 'warn' | 'error'; event: string; message: string; data: Record<string, unknown> | null; created_at: number }
+export type TranscriptEvent = { ts: string; kind: string; data: Record<string, unknown> }
+export type Transcript = { task_id: string; source: string | null; count: number; kinds: Record<string, number>; events: TranscriptEvent[] }
+export type LogFile = { name: string; bytes: number; mtime: number }
 export type Connector = {
-  name: string; template: string | null; kind: 'stdio' | 'http' | 'sse'; command: string | null; args: string[]; url: string | null
+  name: string; template: string | null; kind: 'stdio' | 'http' | 'sse' | 'claude-ai'; command: string | null; args: string[]; url: string | null
+  provider: 'configured' | 'claude-account'; masked_config: Record<string, unknown> | null
   env: Record<string, FieldState>; headers: Record<string, FieldState>; enabled: number; note: string | null
   last_test_at: number | null; last_test_status: 'ok' | 'failed' | null; last_test_error: string | null
   roles: string[]; tools: ConnectorTool[]; tool_count: number; mutating: number; yaml_used_by: string[]
 }
-export type Registered = { name: string; source: 'claude-code' | 'claude-desktop'; kind: string; command: string }
+export type Registered = { name: string; source: 'claude-code' | 'claude-settings' | 'claude-desktop'; kind: string; command: string }
 export type ConnectorsResponse = { connectors: Connector[]; registered: Registered[]; roles: string[]; yaml: { name: string; used_by: string[] }[] }
 export type TemplateField = { secret: boolean; default: string | null; help: string }
 export type Template = { label: string; kind: 'stdio' | 'http' | 'sse'; command: string | null; args: string[]; url?: string; env: Record<string, TemplateField>; headers: Record<string, TemplateField>; note: string }
 export type ConnectorIn = { name: string; template: string | null; kind: string; command: string | null; args: string[]; url: string | null; env: Record<string, { secret: boolean; value: string | null }>; headers: Record<string, { secret: boolean; value: string | null }>; note: string | null; enabled: boolean }
+
 
 async function j<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, { headers: { 'content-type': 'application/json' }, ...init })
@@ -103,6 +106,13 @@ export const api = {
   setToolMutates: (name: string, tool: string, mutates: boolean) => j<unknown>(`/api/connectors/${name}/tools/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify({ mutates }) }),
   setConnectorEnabled: (name: string, enabled: boolean) => j<unknown>(`/api/connectors/${name}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   deleteConnector: (name: string) => j<unknown>(`/api/connectors/${name}`, { method: 'DELETE' }),
+  connectorLog: (name: string) => j<LogEntry[]>(`/api/connectors/${name}/log?limit=150`),
+  transcript: (taskId: string) => j<Transcript>(`/api/tasks/${taskId}/transcript`),
+  logs: () => j<{ dir: string; files: LogFile[] }>('/api/logs'),
+  flowRows: (tail = 300) => j<{ rows: FlowRow[] }>(`/api/logs/flow?tail=${tail}`),
+  logEvents: (name: string, tail = 400, kind?: string) => j<{ name: string; total: number; kinds: Record<string, number>; tasks: Record<string, number>; events: (TranscriptEvent & { task_id: string | null })[] }>(`/api/logs/events?name=${encodeURIComponent(name)}&tail=${tail}${kind ? `&kind=${kind}` : ''}`),
+  logFile: (name: string, tail = 500) => j<{ name: string; total_lines: number; lines: string[] }>(`/api/logs/file?name=${encodeURIComponent(name)}&tail=${tail}`),
+  discoverConnectors: () => j<{ account_servers: string[]; tools: Record<string, string[]>; connectors: Connector[] }>('/api/connectors/discover', { method: 'POST' }),
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
   createJob: (body: string, project_dir?: string) =>
     j<{ task_id: string; chain_id: string }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null }) }),

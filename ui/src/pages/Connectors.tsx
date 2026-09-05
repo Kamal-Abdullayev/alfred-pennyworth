@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, ago, type Connector, type ConnectorsResponse, type ConnectorIn, type Template } from '../api'
+import { api, ago, fmtTime, type Connector, type ConnectorsResponse, type ConnectorIn, type Template, type LogEntry } from '../api'
 
 type Draft = { name: string; template: string; kind: 'stdio' | 'http' | 'sse'; command: string; args: string; url: string; env: Record<string, { secret: boolean; value: string }>; headers: Record<string, { secret: boolean; value: string }>; note: string }
 
@@ -46,11 +46,13 @@ export default function Connectors() {
   return (
     <>
       <h1>Connectors</h1>
-      <p className="muted small">MCP servers the agents can use. Configure here, <b>Test</b> to discover tools, tick the roles that may use it. Only tools classified <i>read</i> are ever allowed to an agent; <i>mutates</i> tools are denied by the runner's gate. Secrets live in the macOS Keychain and are never shown or returned.</p>
-      {msg && <p className="err">{msg}</p>}
+      <p className="muted small">MCP servers the agents can use. Configure here, <b>Test</b> to discover tools, tick the roles that may use it. Only tools classified <i>read</i> are ever allowed to an agent; <i>mutates</i> tools are denied by the runner's gate. Secrets live in the macOS Keychain and are never shown or returned. Connectors marked <b>your Claude account</b> are injected into every run by your claude.ai login (OAuth already done there) — no configuration needed, just tick roles.</p>
+      {msg && <p className={msg.startsWith('Found') || msg.startsWith('No claude') ? 'muted small' : 'err'}>{msg}</p>}
 
-      <div style={{ display: 'flex', gap: 10, marginBottom: 12 }}>
+      <div style={{ display: 'flex', gap: 10, marginBottom: 12, alignItems: 'center', flexWrap: 'wrap' }}>
         <button onClick={() => { setAdding(!adding); setDraft(draftFromTemplate('custom-stdio', templates['custom-stdio'] ?? { label: '', kind: 'stdio', command: '', args: [], env: {}, headers: {}, note: '' })) }}>{adding ? 'Cancel' : '+ Add connector'}</button>
+        <button className="secondary" disabled={busy !== null} onClick={() => run('discover', async () => { const r = await api.discoverConnectors(); setMsg(r.account_servers.length ? `Found from your Claude account: ${r.account_servers.join(', ')}` : 'No claude.ai connectors visible to agent runs') })}>{busy === 'discover' ? 'Probing…' : 'Discover account connectors'}</button>
+        <span className="muted small">runs one tiny haiku turn (≈1¢) to read which MCP servers your Claude login injects</span>
       </div>
 
       {adding && (
@@ -127,23 +129,29 @@ export default function Connectors() {
 
 function ConnectorCard({ c, roles, open, onToggle, busy, run }: { c: Connector; roles: string[]; open: boolean; onToggle: () => void; busy: string | null; run: (l: string, fn: () => Promise<unknown>) => Promise<void> }) {
   const [testMsg, setTestMsg] = useState<string | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const status = c.last_test_status
   return (
     <div className="card" style={{ marginBottom: 10, opacity: c.enabled ? 1 : 0.6 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <div>
-          <b style={{ fontSize: 15 }}>{c.name}</b> <span className="pill">{c.kind}</span>{' '}
+          <b style={{ fontSize: 15 }}>{c.name}</b> {c.provider === 'claude-account' ? <span className="pill answered">your Claude account</span> : <span className="pill">{c.kind}</span>}{' '}
           {status === 'ok' && <span className="pill pass">tested {ago(c.last_test_at)}</span>}
           {status === 'failed' && <span className="pill fail">test failed</span>}
           {!status && <span className="pill">untested</span>}
           {!c.enabled && <span className="pill stuck">disabled</span>}
-          <div className="muted small mono">{c.kind === 'stdio' ? `${c.command ?? ''} ${c.args.join(' ')}` : c.url}</div>
+          <div className="muted small mono">{c.provider === 'claude-account' ? 'discovered from agent runs · tools refresh every run' : c.kind === 'stdio' ? `${c.command ?? ''} ${c.args.join(' ')}` : c.url}</div>
         </div>
         <div className="actions">
-          <button className="btn-link" disabled={busy !== null} onClick={() => run('test:' + c.name, async () => { const r = await api.testConnector(c.name); setTestMsg(r.ok ? `${r.tools?.length ?? 0} tools, ${r.mutating ?? 0} mutating` : r.error) })}>{busy === 'test:' + c.name ? 'Testing…' : 'Test'}</button>
+          {c.provider !== 'claude-account' && <button className="btn-link" disabled={busy !== null} onClick={() => run('test:' + c.name, async () => { const r = await api.testConnector(c.name); setTestMsg(r.ok ? `${r.tools?.length ?? 0} tools, ${r.mutating ?? 0} mutating` : r.error) })}>{busy === 'test:' + c.name ? 'Testing…' : 'Test'}</button>}
           <button className="btn-link" disabled={busy !== null} onClick={() => run('en:' + c.name, () => api.setConnectorEnabled(c.name, !c.enabled))}>{c.enabled ? 'Disable' : 'Enable'}</button>
           <button className="btn-link" onClick={onToggle}>{open ? 'Hide' : 'Details'}</button>
-          <button className="btn-link" disabled={busy !== null} onClick={() => { if (confirm(`Delete connector ${c.name} and its Keychain secrets?`)) run('del:' + c.name, () => api.deleteConnector(c.name)) }}>Delete</button>
+          {!confirmDelete
+            ? <button className="btn-link" disabled={busy !== null} onClick={() => setConfirmDelete(true)}>Delete</button>
+            : <>
+                <button className="btn-link" style={{ borderColor: 'var(--bad)', color: 'var(--bad)' }} disabled={busy !== null} onClick={() => run('del:' + c.name, () => api.deleteConnector(c.name))}>{busy === 'del:' + c.name ? 'Deleting…' : 'Confirm delete (removes Keychain secrets too)'}</button>
+                <button className="btn-link" onClick={() => setConfirmDelete(false)}>Keep</button>
+              </>}
         </div>
       </div>
       {testMsg && <div className={`small ${c.last_test_status === 'failed' ? 'err' : 'muted'}`} style={{ marginTop: 6 }}>{testMsg}</div>}
@@ -185,8 +193,33 @@ function ConnectorCard({ c, roles, open, onToggle, busy, run }: { c: Connector; 
             </table>
           ) : <div className="muted small">No tools recorded yet — Test the connector.</div>}
           {c.note && <p className="muted small">{c.note}</p>}
+          {c.masked_config && <details style={{ marginTop: 8 }}><summary className="small">resolved config (secrets masked)</summary><pre className="log">{JSON.stringify(c.masked_config, null, 2)}</pre></details>}
+          <LogPanel name={c.name} refreshKey={`${c.last_test_at}-${c.tool_count}-${c.roles.join(',')}-${c.enabled}`} />
         </div>
       )}
+    </div>
+  )
+}
+
+function LogPanel({ name, refreshKey }: { name: string; refreshKey: string }) {
+  const [log, setLog] = useState<LogEntry[]>([])
+  const [expanded, setExpanded] = useState<number | null>(null)
+  useEffect(() => { api.connectorLog(name).then(setLog).catch(() => {}) }, [name, refreshKey])
+  return (
+    <div style={{ marginTop: 12 }}>
+      <h2 style={{ marginTop: 0 }}>Log <span className="muted" style={{ textTransform: 'none', letterSpacing: 0 }}>· {log.length} entries, newest first, secrets masked</span></h2>
+      {log.length === 0 && <div className="muted small">nothing yet</div>}
+      <div className="card" style={{ padding: 0, maxHeight: 360, overflow: 'auto' }}>
+        {log.map((e) => (
+          <div key={e.id} style={{ padding: '6px 10px', borderBottom: '1px solid var(--border)', cursor: e.data ? 'pointer' : 'default' }} onClick={() => setExpanded(expanded === e.id ? null : e.id)}>
+            <span className="muted small mono">{fmtTime(e.created_at)}</span>{' '}
+            <span className={`pill ${e.level === 'error' ? 'fail' : e.level === 'warn' ? 'stuck' : ''}`}>{e.event}</span>{' '}
+            <span className="small">{e.message}</span>
+            {e.data && expanded === e.id && <pre className="log small" style={{ marginTop: 6 }}>{JSON.stringify(e.data, null, 2)}</pre>}
+            {e.data && expanded !== e.id && <span className="muted small"> · click for details</span>}
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

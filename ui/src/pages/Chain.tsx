@@ -2,18 +2,19 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { api, subscribe, fmtCost, fmtTime, leadOutput, codeRefPath, type ChainDetail, type Task, type Answer, type CodeRef, type Source, type Plan, type Turn } from '../api'
+import { api, subscribe, fmtCost, fmtTime, leadOutput, type ChainDetail, type Task, type Answer, type CodeRef, type Plan, type Turn, type CodeLink } from '../api'
+import { TranscriptPanel } from '../components/Transcript'
 
 type Impl = { status: string; summary: string; branch: string | null; commit_sha: string | null; files_changed: string[]; approach: string | null; verification: { commands_run: string[]; result: string; notes: string }; open_questions: string[]; blocked: { reason: string; conflict_detail: string; needs: string[] } | null }
 type Review = { verdict: string; findings: { file: string; line: number | null; severity: string; claim: string; evidence: string }[]; tests_run: { name: string; status: string; output_excerpt: string }[]; edge_cases_probed: string[] }
 
 // ---------------------------------------------------------------- answers ----
 
-function CodeBlock({ code: r, src }: { code: CodeRef; src: Source }) {
-  const { abs, idea } = codeRefPath(src, r)
+function CodeBlock({ code: r, link }: { code: CodeRef; link: CodeLink | undefined }) {
   const [copied, setCopied] = useState(false)
   const lines = r.snippet.replace(/\n$/, '').split('\n')
-  const copy = () => { navigator.clipboard?.writeText(`${abs}:${r.start_line}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }) }
+  const copyText = link?.abs ? `${link.abs}:${r.start_line}` : `${r.path}:${r.start_line}`
+  const copy = () => { navigator.clipboard?.writeText(copyText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }) }
   return (
     <div className="coderef">
       <div className="hdr">
@@ -22,7 +23,9 @@ function CodeBlock({ code: r, src }: { code: CodeRef; src: Source }) {
           <div className="path mono">{r.path}:{r.start_line}{r.end_line !== r.start_line ? `-${r.end_line}` : ''} <span className="muted">· {r.language}</span></div>
         </div>
         <div className="actions">
-          <a className="btn-link" href={idea} title={`Open ${abs} at line ${r.start_line} in IntelliJ`}>Open in IntelliJ</a>
+          {link?.idea && <a className="btn-link" href={link.idea} title={`Open ${link.abs} at line ${r.start_line} in IntelliJ`}>Open in IntelliJ</a>}
+          {link?.web && <a className="btn-link" href={link.web} target="_blank" rel="noreferrer" title="Open these lines in GitLab">Open in GitLab</a>}
+          {!link?.idea && !link?.web && <span className="muted small" title="No local checkout and no GitLab project recorded for this answer">not openable locally</span>}
           <button className="btn-link" onClick={copy}>{copied ? 'copied' : 'copy path'}</button>
         </div>
       </div>
@@ -44,7 +47,7 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
       <h1><span className="pill answered">answered</span> {root.title}</h1>
       <div className="kv card">
         <div className="k">confidence</div><div><span className={`pill ${a.confidence}`}>{a.confidence}</span></div>
-        <div className="k">read from</div><div className="mono">{src.repo_path}{src.branch ? <span className="muted"> · {src.branch}</span> : ''}{src.commit ? <span className="muted"> @ {src.commit.slice(0, 8)}</span> : ''}</div>
+        <div className="k">read from</div><div className="mono">{src.gitlab_project ? <>GitLab <b>{src.gitlab_project}</b></> : (src.repo_path ?? 'unknown')}{src.branch ? <span className="muted"> · {src.branch}</span> : ''}{src.commit ? <span className="muted"> @ {src.commit.slice(0, 8)}</span> : ''}</div>
         <div className="k">asked</div><div>{fmtTime(root.created_at)} by {root.created_by} · {fmtCost(d.cost_usd)}</div>
       </div>
 
@@ -57,7 +60,7 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
       {a.code.length > 0 && (
         <>
           <h2>Code ({a.code.length})</h2>
-          {a.code.map((c, i) => <CodeBlock key={i} code={c} src={src} />)}
+          {a.code.map((c, i) => <CodeBlock key={i} code={c} link={d.code_links[i]} />)}
         </>
       )}
 
@@ -74,6 +77,7 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
 
       <details style={{ marginTop: 18 }}><summary className="small">run details — {fmtCost(d.cost_usd)}</summary>
         <TurnsTable turns={d.turns} />
+        <TranscriptPanel taskId={root.id} />
         <div className="card" style={{ padding: 0, marginTop: 8 }}>
           <table><thead><tr><th>Model</th><th>Turns</th><th>Input+cache</th><th>Output</th><th>Cost</th><th>Duration</th></tr></thead>
             <tbody>{d.usage.map((u) => <tr key={u.id}><td className="mono small">{u.model}</td><td>{u.turns ?? '—'}</td><td className="mono">{(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens).toLocaleString()}</td><td className="mono">{u.output_tokens.toLocaleString()}</td><td className="mono">{fmtCost(u.cost_usd)}</td><td>{u.duration_ms ? `${Math.round(u.duration_ms / 1000)}s` : '—'}</td></tr>)}</tbody>
@@ -205,6 +209,7 @@ function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: 
               <div style={{ marginTop: 8 }}><Structured task={t} /></div>
               {(() => { const u = d.usage.filter((x) => x.task_id === t.id); const c = u.reduce((a, x) => a + x.cost_usd, 0); return u.length ? <div className="muted small" style={{ marginTop: 6 }}>run cost {fmtCost(c)} · {u.find((x) => x.turns)?.turns ?? '—'} turns · {Math.round((u[0]?.duration_ms ?? 0) / 1000)}s</div> : null })()}
               <TurnsTable turns={d.turns.filter((x) => x.task_id === t.id)} />
+              <TranscriptPanel taskId={t.id} />
               {t.status === 'failed' && t.result && <pre className="log small" style={{ marginTop: 8 }}>{t.result.slice(-1500)}</pre>}
               <details style={{ marginTop: 6 }}><summary className="small">task body</summary><pre className="log">{t.body}</pre></details>
             </div>

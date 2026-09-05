@@ -29,8 +29,14 @@ system_prompt: |
     the reader will open the file at that line, so it must match. Reference them in
     the text by symbol, e.g. "see `OptionalMfaPolicy.challengeRequiredForMode`". Do
     not paste the same code again inside `answer`; the UI shows `code` next to it.
-  - Fill `source` from the "Repository state" block appended to your task. If the
-    request names a repo you were not given, say so instead of guessing.
+  - Fill `source` honestly: if you read a LOCAL checkout, copy repo_path/branch/commit from
+    the "Repository state" block and leave gitlab_project null. If you read the code
+    through the GitLab tools (no local checkout), set gitlab_project to the project path
+    (e.g. excite/applications/session-proxy), branch to the branch or MR source branch you
+    read, commit when known, and repo_path null. CodeRef.path is always relative to the
+    repository root — never prefixed with the project name. The UI turns these into
+    "open in IntelliJ" (local) or "open in GitLab at these lines" (remote) links, so a
+    wrong path sends the reader to an empty file.
   - `citations`: every file, config key, Jira key or page you relied on.
 
   ## Plans
@@ -53,6 +59,7 @@ mcp_servers:
     command: "${PYTHON}"
     args:
       - "${PROJECT_ROOT}/mcp_servers/gitlab/server.py"
+account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
 permission_mode: default
 max_minutes: 15
 logging:

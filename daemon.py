@@ -271,6 +271,11 @@ async def main(role):
     if role not in cfgs:
         sys.exit(f"unknown role {role!r}. roles are agents/*.yaml: {', '.join(cfgs)}")
     board.init()
+    # every role gets its log files up front, so the Logs page shows all agents even before they run
+    (ROOT / "logs").mkdir(exist_ok=True)
+    (ROOT / "logs" / "tasks").mkdir(exist_ok=True)
+    for suffix in (".jsonl", ".log"):
+        (ROOT / "logs" / f"{role}{suffix}").touch()
     agent_name = f"{role}-daemon"
     if role == "team_lead":
         print(f"[{role}] also watching {INBOX}/ for .md/.txt job files")

@@ -173,6 +173,7 @@ def chain(chain_id: str):
     return {
         "root": _task(root), "tasks": [_task(t) for t in tasks_], "findings": findings, "usage": usage,
         "turns": board.turns_for_chain(chain_id),
+        "code_links": (_code_links((_task(root)["structured"] or {}).get("answer") or {}) if _kind(root) == "answer" else []),
         "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_), "kind": _kind(root),
         "cost_usd": sum(u["cost_usd"] for u in usage),
     }
@@ -270,6 +271,7 @@ def _registered() -> list[dict]:
     """Servers registered for Claude Desktop/Code — import candidates. Names and redacted commands only."""
     out = []
     for label, path in (("claude-code", Path.home() / ".claude.json"),
+                        ("claude-settings", Path.home() / ".claude/settings.json"),
                         ("claude-desktop", Path.home() / "Library/Application Support/Claude/claude_desktop_config.json")):
         try:
             cfg = json.loads(path.read_text())
@@ -295,6 +297,8 @@ def _connector_view(row: dict) -> dict:
         "headers": {k: {"secret": bool(v.get("secret")), "set": (vault.has_secret(row["name"], f"header:{k}") if v.get("secret") else bool(v.get("value")))}
                     for k, v in headers.items()},
         "roles": board.connector_roles(row["name"]),
+        "provider": "claude-account" if row["kind"] == conn.CLAUDE_AI_KIND else "configured",
+        "masked_config": (conn.masked_config(row) if row["kind"] != conn.CLAUDE_AI_KIND else None),
         "tools": tools, "tool_count": len(tools), "mutating": sum(t["mutates"] for t in tools),
         "yaml_used_by": [a["role"] for a in _agents() if row["name"] in a["mcp_servers"]],
     }
@@ -347,10 +351,15 @@ def connector_save(c: ConnectorIn):
             headers[h] = {"secret": True}
         else:
             headers[h] = {"secret": False, "value": spec.get("value")}
+    existed = board.get_connector(name) is not None
     board.upsert_connector({"name": name, "template": c.template, "kind": c.kind, "command": c.command,
                             "args": json.dumps(c.args), "url": c.url, "env": json.dumps(env),
                             "headers": json.dumps(headers), "note": c.note, "enabled": int(c.enabled)})
-    return _connector_view(board.get_connector(name))
+    row = board.get_connector(name)
+    conn.log(name, "saved", f"{'updated' if existed else 'created'} from template {c.template or 'custom'}",
+             {"config": conn.masked_config(row), "secrets_provided": [k for k, v in c.env.items() if v.get("secret") and v.get("value")]
+              + [f"header:{h}" for h, v in c.headers.items() if v.get("secret") and v.get("value")]})
+    return _connector_view(row)
 
 
 import re as _re
@@ -360,13 +369,23 @@ re_name = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 @app.post("/api/connectors/import")
 def connector_import(body: dict):
     source, name = body.get("source"), body.get("name")
-    if source not in ("claude-code", "claude-desktop") or not name:
+    if source not in ("claude-code", "claude-settings", "claude-desktop") or not name:
         raise HTTPException(400, "source and name required")
     try:
         conn.import_from_config(source, name)
     except KeyError:
         raise HTTPException(404, f"{name} not registered in {source}")
     return _connector_view(board.get_connector(name))
+
+
+@app.post("/api/connectors/discover")
+async def connectors_discover():
+    """Find the MCP servers your Claude account injects into agent runs (claude.ai connectors)."""
+    try:
+        result = await conn.probe_account_connectors()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, conn.mask(f"{type(e).__name__}: {e}"))
+    return {**result, "connectors": [_connector_view(r) for r in board.list_connectors()]}
 
 
 @app.post("/api/connectors/{name}/test")
@@ -383,19 +402,31 @@ def connector_roles(name: str, body: dict):
         raise HTTPException(404, f"no connector {name}")
     roles = [r for r in body.get("roles", []) if r in daemon.configs()]
     board.set_connector_roles(name, roles)
+    allowed = [t["tool"] for t in board.connector_tools(name) if not t["mutates"]]
+    conn.log(name, "roles", f"roles set to {roles or 'none'}; {len(allowed)} read tools will be allowed on their next run",
+             {"roles": roles, "allowed_tools": allowed})
     return {"roles": roles}
 
 
 @app.put("/api/connectors/{name}/tools/{tool}")
 def connector_tool_mutates(name: str, tool: str, body: dict):
     board.set_tool_mutates(name, tool, bool(body.get("mutates")))
+    conn.log(name, "tool_access", f"{tool} set to {'mutates (denied)' if body.get('mutates') else 'read (allowed)'} by user")
     return {"tool": tool, "mutates": bool(body.get("mutates")), "source": "user"}
 
 
 @app.put("/api/connectors/{name}/enabled")
 def connector_enabled(name: str, body: dict):
     board.set_connector_enabled(name, bool(body.get("enabled")))
+    conn.log(name, "enabled", "enabled" if body.get("enabled") else "disabled")
     return {"enabled": bool(body.get("enabled"))}
+
+
+@app.get("/api/connectors/{name}/log")
+def connector_log(name: str, limit: int = 100):
+    if not board.get_connector(name):
+        raise HTTPException(404, f"no connector {name}")
+    return board.connector_log(name, limit)
 
 
 @app.delete("/api/connectors/{name}")
@@ -411,6 +442,170 @@ def connector_delete(name: str):
             vault.delete_secret(name, f"header:{h}")
     board.delete_connector(name)
     return {"deleted": name}
+
+
+# ------------------------------------------------------------- code links ----
+
+def _gitlab_base() -> str:
+    """Web base URL for GitLab deep links: the gitlab-onprem connector's GITLAB_URL, else env, else default."""
+    row = board.get_connector("gitlab-onprem")
+    if row:
+        env = json.loads(row.get("env") or "{}")
+        v = (env.get("GITLAB_URL") or {}).get("value")
+        if v:
+            return str(v).rstrip("/")
+    return os.environ.get("GITLAB_URL", "https://gitlab.ballys.tech").rstrip("/")
+
+
+def _code_links(answer: dict) -> list[dict]:
+    """For each CodeRef: where it can actually be opened. IntelliJ only when the file exists on
+    this machine; GitLab blob link when the lead read it remotely; always the path to copy."""
+    src = answer.get("source") or {}
+    out = []
+    for ref in answer.get("code") or []:
+        rel = (ref.get("path") or "").lstrip("/")
+        start = ref.get("start_line") or 1
+        end = ref.get("end_line") or start
+        entry = {"path": rel, "abs": None, "exists": False, "idea": None, "web": None}
+        repo = src.get("repo_path")
+        if repo and os.path.isdir(repo):
+            abs_ = os.path.join(repo, rel)
+            entry["abs"] = abs_
+            entry["exists"] = os.path.isfile(abs_)
+            if entry["exists"]:
+                from urllib.parse import quote
+                entry["idea"] = f"idea://open?file={quote(abs_, safe='/')}&line={start}"
+        proj = src.get("gitlab_project")
+        if proj:
+            ref_name = src.get("commit") or src.get("branch") or "HEAD"
+            entry["web"] = f"{_gitlab_base()}/{proj.strip('/')}/-/blob/{ref_name}/{rel}#L{start}-{end}"
+        out.append(entry)
+    return out
+
+
+# ------------------------------------------------------------ transcripts ----
+
+LOGS = ROOT / "logs"
+_FIELD_CAP = 20_000   # chars per string field in the JSON view; ?raw=1 returns the untouched JSONL
+
+
+def _cap(v, n=_FIELD_CAP):
+    if isinstance(v, str):
+        return v if len(v) <= n else v[:n] + f"…[+{len(v) - n} chars]"
+    if isinstance(v, dict):
+        return {k: _cap(x, n) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_cap(x, n) for x in v]
+    return v
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    out = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(e, dict) and e.get("kind"):
+            out.append(e)
+    return out
+
+
+def _task_events(task_id: str) -> tuple[list[dict], str | None]:
+    """Per-task file when it exists; otherwise the matching segment of the role log
+    (runs from before per-task files existed)."""
+    p = LOGS / "tasks" / f"{task_id}.jsonl"
+    if p.is_file():
+        return _read_jsonl(p), str(p)
+    t = board.get_task(task_id)
+    if not t:
+        return [], None
+    role_log = LOGS / f"{t['role']}.jsonl"
+    if not role_log.is_file():
+        return [], None
+    evs = _read_jsonl(role_log)
+    start = next((i for i, e in enumerate(evs) if e["kind"] == "request" and e.get("data", {}).get("task_id") == task_id), None)
+    if start is None:
+        return [], None
+    seg = evs[start:]
+    end = next((i for i, e in enumerate(seg) if e["kind"] == "response"), len(seg) - 1)
+    return seg[:end + 1], str(role_log)
+
+
+@app.get("/api/tasks/{task_id}/transcript")
+def task_transcript(task_id: str, raw: int = 0):
+    evs, source = _task_events(task_id)
+    if raw:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("\n".join(json.dumps(e, default=str) for e in evs), media_type="application/x-ndjson")
+    kinds: dict[str, int] = {}
+    for e in evs:
+        kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+    return {"task_id": task_id, "source": source, "count": len(evs), "kinds": kinds, "events": _cap(evs)}
+
+
+@app.get("/api/logs")
+def logs_list():
+    files = []
+    if LOGS.is_dir():
+        for p in sorted(LOGS.rglob("*")):
+            if p.is_file():
+                files.append({"name": str(p.relative_to(LOGS)), "bytes": p.stat().st_size, "mtime": p.stat().st_mtime})
+    return {"dir": str(LOGS), "files": files}
+
+
+@app.get("/api/logs/file")
+def logs_file(name: str, tail: int = 500):
+    p = (LOGS / name).resolve()
+    if LOGS.resolve() not in p.parents or not p.is_file():
+        raise HTTPException(404, "no such log")
+    lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+    return {"name": name, "total_lines": len(lines), "lines": lines[-tail:] if tail else lines}
+
+
+_FLOW_RE = _re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+\[(\w+)\]\s+(CLAIMED|FINISHED|FAILED|NEW JOB)\s+(\S+)\s*(.*)$", _re.S)
+
+
+@app.get("/api/logs/flow")
+def logs_flow(tail: int = 300):
+    """flow.log parsed into rows: ts, role, action, task, detail."""
+    p = LOGS / "flow.log"
+    if not p.is_file():
+        return {"rows": []}
+    rows = []
+    for line in p.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]:
+        m = _FLOW_RE.match(line)
+        if m:
+            ts, role, action, task, detail = m.groups()
+            rows.append({"ts": ts, "role": role, "action": action.replace(" ", "_"), "task": task, "detail": " ".join(detail.split())})
+        else:
+            rows.append({"ts": "", "role": "", "action": "", "task": "", "detail": line})
+    return {"rows": rows}
+
+
+@app.get("/api/logs/events")
+def logs_events(name: str, tail: int = 400, kind: str | None = None):
+    """A role JSONL parsed into events, each tagged with the task it belonged to."""
+    p = (LOGS / name).resolve()
+    if LOGS.resolve() not in p.parents or not p.is_file() or not p.name.endswith(".jsonl"):
+        raise HTTPException(404, "no such jsonl log")
+    evs = _read_jsonl(p)
+    task = None
+    for e in evs:
+        if e["kind"] == "request":
+            task = (e.get("data") or {}).get("task_id")
+        e["task_id"] = task
+    if kind:
+        evs = [e for e in evs if e["kind"] == kind or (kind == "tools" and e["kind"].startswith("tool_"))]
+    kinds: dict[str, int] = {}
+    for e in evs:
+        kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+    tasks_ = {}
+    for e in evs:
+        if e.get("task_id"):
+            tasks_.setdefault(e["task_id"], 0)
+            tasks_[e["task_id"]] += 1
+    return {"name": name, "total": len(evs), "kinds": kinds, "tasks": tasks_, "events": _cap(evs[-tail:])}
 
 
 @app.get("/api/events")

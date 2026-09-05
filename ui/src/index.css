@@ -51,7 +51,7 @@ ul.plain { margin: 6px 0; padding-left: 18px; }
 .md p { margin: 8px 0; } .md h1, .md h2, .md h3 { color: var(--fg); text-transform: none; letter-spacing: 0; margin: 16px 0 6px; } .md h1 { font-size: 17px; } .md h2 { font-size: 15px; } .md h3 { font-size: 14px; }
 .md ul, .md ol { padding-left: 22px; margin: 6px 0; } .md li { margin: 2px 0; }
 .md table { margin: 8px 0; font-size: 13px; } .md th, .md td { padding: 5px 9px; }
-.md code { background: var(--panel-2); border: 1px solid var(--border); padding: 0 5px; border-radius: 4px; font-size: 12.5px; }
+.md code { color: #e0787b; background: rgba(232,162,94,.08); border: 1px solid rgba(232,162,94,.25); padding: 0 5px; border-radius: 4px; font-size: 12.5px; }  /* inline code: orange, like Claude's UI */
 .md pre { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; overflow: auto; } .md pre code { background: none; border: 0; padding: 0; }
 .md blockquote { margin: 8px 0; padding: 4px 12px; border-left: 3px solid var(--border); color: var(--muted); }
 .coderef { margin-bottom: 14px; }
@@ -61,6 +61,8 @@ ul.plain { margin: 6px 0; padding-left: 18px; }
 .coderef .line { display: flex; } .coderef .line:hover { background: rgba(255,255,255,.03); }
 .coderef .ln { flex: 0 0 52px; text-align: right; color: var(--muted); padding-right: 14px; user-select: none; }
 .coderef .src { white-space: pre; padding-right: 14px; }
+.flowrow { display: grid; grid-template-columns: 150px 90px 90px 1fr; gap: 10px; padding: 5px 10px; border-bottom: 1px solid var(--border); align-items: baseline; }
+.flowrow .act.CLAIMED { color: var(--run); } .flowrow .act.FINISHED { color: var(--ok); } .flowrow .act.FAILED { color: var(--bad); } .flowrow .act.NEW { color: var(--accent); }
 .coderef .why { color: var(--muted); font-size: 12.5px; margin-top: 5px; }
 .btn-link { background: none; border: 1px solid var(--border); color: var(--fg); padding: 2px 9px; font-size: 12px; border-radius: 6px; cursor: pointer; font-weight: 500; }
 .btn-link:hover { background: var(--panel); }

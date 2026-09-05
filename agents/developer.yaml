@@ -33,6 +33,7 @@ mcp_servers:
     command: "${PYTHON}"
     args:
       - "${PROJECT_ROOT}/mcp_servers/gitlab/server.py"
+account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
 permission_mode: acceptEdits
 max_minutes: 45
 logging:

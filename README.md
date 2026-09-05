@@ -100,12 +100,22 @@ Cloud via mcp-remote, Confluence/Jira on-prem, GitLab, MySQL, custom stdio/HTTP)
 **Import** a server already registered for Claude Desktop/Code. Secrets go to the
 macOS Keychain (`vault.py`, service `alfred-mcp`) — never to SQLite, YAML or logs.
 
+**Your Claude account's connectors** (the ones you added on claude.ai — Atlassian,
+Microsoft 365, Gmail, …) are available to agents without any configuration: press
+**Discover account connectors** (one haiku turn) to list them, tick roles, and set
+`account_connectors: true` in that role's YAML. That switches the role's
+`setting_sources` from `[]` to `["user"]`, which is the only way the CLI attaches
+those servers — and also loads your `~/.claude/settings.json` into the run. The
+allowlist gate still applies: only discovered read tools are allowed.
+
 **Test** starts the server, lists its tools and classifies each as *read* or
 *mutates* (MCP `readOnlyHint` annotation when present, otherwise a name heuristic
 biased towards *mutates*; you can flip any tool, and your decision sticks). Tick the
 roles that may use the connector. On the next run the runner adds the server to that
 role's `mcp_servers` and allows **only its read tools**; mutating and undiscovered
-tools are denied by the PreToolUse gate. A connector with the same name as one in
+tools are denied by the PreToolUse gate. Every connector keeps a **log** (config
+changes, tests with the server's own stderr, per-run status, denied calls) with
+secrets masked — open a connector's Details in the UI. A connector with the same name as one in
 the role's YAML is shadowed by the YAML one.
 
 ## Cost

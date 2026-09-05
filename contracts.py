@@ -77,7 +77,7 @@ class Citation(BaseModel):
 
 class CodeRef(BaseModel):
     """A piece of code the answer talks about. Copied verbatim so the reader sees the real thing."""
-    path: str = Field(description="Repo-relative file path, e.g. service/src/main/java/.../MfaType.java")
+    path: str = Field(description="Path relative to the repository root, e.g. service/src/main/java/.../MfaType.java — never prefixed with the project name")
     start_line: int = Field(description="First line of the snippet in the file (1-based)")
     end_line: int = Field(description="Last line of the snippet in the file")
     symbol: str | None = Field(description="Method/class/field the snippet shows, e.g. OptionalMfaPolicy.challengeRequiredForMode")
@@ -88,9 +88,10 @@ class CodeRef(BaseModel):
 
 class Source(BaseModel):
     """What exactly was read. Two clones of one repo can differ by weeks — always say which."""
-    repo_path: str = Field(description="Absolute path of the checkout that was read")
-    branch: str | None = Field(description="Branch name of that checkout, as given in the task's repository state")
-    commit: str | None = Field(description="Commit sha of that checkout, as given in the task's repository state")
+    repo_path: str | None = Field(description="Absolute path of the LOCAL checkout that was read; null if the code was read through GitLab tools")
+    gitlab_project: str | None = Field(description="GitLab project path (e.g. excite/applications/session-proxy) when the code was read through GitLab tools; null if read locally")
+    branch: str | None = Field(description="Branch that was read (from the repository state block, or the MR's source branch)")
+    commit: str | None = Field(description="Commit sha that was read, when known")
 
 
 class Answer(BaseModel):

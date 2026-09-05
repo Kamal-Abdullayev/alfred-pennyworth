@@ -130,6 +130,17 @@ CREATE TABLE IF NOT EXISTS connector_tools (
     source      TEXT NOT NULL,           -- annotation | heuristic | user
     PRIMARY KEY (connector, tool)
 );
+CREATE TABLE IF NOT EXISTS connector_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    connector  TEXT NOT NULL,
+    level      TEXT NOT NULL,               -- info | warn | error
+    event      TEXT NOT NULL,               -- saved | imported | test_start | server_stderr | test_ok | test_failed |
+                                            -- roles | enabled | deleted | discovered | run_init | denied
+    message    TEXT NOT NULL,               -- already masked; never contains a secret value
+    data       TEXT,                        -- JSON, masked
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_connector_log ON connector_log(connector, id);
 CREATE TABLE IF NOT EXISTS connector_roles (
     connector TEXT NOT NULL,
     role      TEXT NOT NULL,
@@ -404,6 +415,7 @@ def delete_connector(name):
     with connect() as con:
         con.execute("DELETE FROM connector_tools WHERE connector=?", (name,))
         con.execute("DELETE FROM connector_roles WHERE connector=?", (name,))
+        con.execute("DELETE FROM connector_log WHERE connector=?", (name,))
         con.execute("DELETE FROM connectors WHERE name=?", (name,))
 
 
@@ -445,6 +457,24 @@ def set_connector_roles(name, roles):
 def connector_roles(name):
     with connect() as con:
         return [r["role"] for r in con.execute("SELECT role FROM connector_roles WHERE connector=? ORDER BY role", (name,))]
+
+
+def log_connector(connector, event, message, data=None, level="info"):
+    with connect() as con:
+        con.execute("INSERT INTO connector_log (connector, level, event, message, data, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (connector, level, event, message, json.dumps(data, default=str) if data is not None else None, time.time()))
+        # keep the log bounded per connector
+        con.execute("DELETE FROM connector_log WHERE connector=? AND id NOT IN "
+                    "(SELECT id FROM connector_log WHERE connector=? ORDER BY id DESC LIMIT 500)", (connector, connector))
+
+
+def connector_log(connector, limit=100):
+    with connect() as con:
+        rows = con.execute("SELECT * FROM connector_log WHERE connector=? ORDER BY id DESC LIMIT ?", (connector, limit)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r); d["data"] = json.loads(d["data"]) if d["data"] else None; out.append(d)
+        return out
 
 
 def connectors_for_role(role):

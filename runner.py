@@ -18,7 +18,7 @@ import yaml
 from dotenv import load_dotenv
 from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions,
-    AssistantMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage,
+    AssistantMessage, SystemMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage,
     HookMatcher,
 )
 
@@ -61,15 +61,38 @@ def is_allowed(tool: str, rules: list[str]) -> bool:
     return False
 
 
-def make_logger(name, level):
+TASK_LOG_DIR = LOG_DIR / "tasks"
+
+
+def make_logger(name, level, task_id=None):
+    """JSONL machine log. Every event goes to logs/<role>.jsonl (the role's history) AND,
+    when a task id is known, to logs/tasks/<task_id>.jsonl — one file per run, which is
+    what the UI's transcript view reads. Close with close_logger() after the run."""
     LOG_DIR.mkdir(exist_ok=True)
-    log = logging.getLogger(name)
-    if not log.handlers:  # daemon loops call this repeatedly; don't stack handlers
-        handler = logging.FileHandler(LOG_DIR / f"{name}.jsonl")
-        handler.setFormatter(logging.Formatter("%(message)s"))
-        log.addHandler(handler)
+    if task_id is None:
+        log = logging.getLogger(name)
+        if not log.handlers:
+            handler = logging.FileHandler(LOG_DIR / f"{name}.jsonl")
+            handler.setFormatter(logging.Formatter("%(message)s"))
+            log.addHandler(handler)
+        log.setLevel(level.upper())
+        return log
+    TASK_LOG_DIR.mkdir(exist_ok=True)
+    log = logging.getLogger(f"{name}.task.{task_id}")
+    log.propagate = False
+    if not log.handlers:
+        for path in (LOG_DIR / f"{name}.jsonl", TASK_LOG_DIR / f"{task_id}.jsonl"):
+            h = logging.FileHandler(path)
+            h.setFormatter(logging.Formatter("%(message)s"))
+            log.addHandler(h)
     log.setLevel(level.upper())
     return log
+
+
+def close_logger(log):
+    for h in list(log.handlers):
+        h.close()
+        log.removeHandler(h)
 
 
 def log_event(log, kind, payload):
@@ -96,9 +119,17 @@ def human(hlog, text):
     hlog.info(f"{datetime.now().strftime('%H:%M:%S')}  {text}")
 
 
-def shorten(value, limit=200):
-    s = " ".join(str(value).split())
-    return s if len(s) <= limit else s[:limit] + " ..."
+# logs/<role>.log is meant to be READ by a person, so it is not truncated unless the
+# role's YAML sets logging.human_max_len. The JSONL next to it is the machine record.
+_HUMAN_MAX = {"limit": 0}
+
+
+def shorten(value, limit=None):
+    s = str(value)
+    limit = _HUMAN_MAX["limit"] if limit is None or _HUMAN_MAX["limit"] == 0 else min(limit, _HUMAN_MAX["limit"])
+    if not limit or len(s) <= limit:
+        return s
+    return s[:limit] + f" …[+{len(s) - limit} chars]"
 
 
 def load_config(config_path: str) -> dict:
@@ -132,7 +163,7 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
 
     meta = meta or {}
     cfg = load_config(config_path)
-    log = make_logger(cfg["name"], cfg["logging"]["level"])
+    log = make_logger(cfg["name"], cfg["logging"]["level"], task_id=meta.get("id"))
     hlog = make_human_logger(cfg["name"])
     allowed = list(cfg.get("allowed_tools", []))
     contract = cfg.get("contract")
@@ -146,6 +177,7 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
         workdir = WORKSPACE
 
     max_len = int(cfg["logging"].get("max_field_len", 100_000))
+    _HUMAN_MAX["limit"] = int(cfg["logging"].get("human_max_len", 0))   # 0 = never trim
     denied: list[str] = []
 
     # --- hooks: the deterministic "what it does" trail + the allowlist gate ---
@@ -155,6 +187,7 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
             if not is_allowed(tool, allowed):
                 denied.append(tool)
                 log_event(log, "tool_denied", {"tool_use_id": tool_use_id, "tool": tool})
+                connectors.log_denied(tool, {"task_id": meta.get("id"), "role": cfg["name"]})
                 human(hlog, f"  XX {tool}: DENIED (not in allowed_tools)")
                 return {"hookSpecificOutput": {
                     "hookEventName": "PreToolUse",
@@ -164,7 +197,7 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
             if cfg["logging"].get("log_tool_io", True):
                 log_event(log, "tool_call", {"tool_use_id": tool_use_id, "tool": tool,
                                              "input": input_data["tool_input"]})
-                human(hlog, f"  -> {tool}: {shorten(input_data['tool_input'], 160)}")
+                human(hlog, f"  -> {tool}: {shorten(input_data['tool_input'])}")
         except Exception as e:
             log_event(log, "hook_error", {"where": "pre_tool", "error": repr(e)})
         return {}
@@ -201,7 +234,11 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
         mcp_servers=mcp_servers,
         permission_mode=cfg.get("permission_mode", "default"),
         cwd=str(workdir),
-        setting_sources=[],          # isolation: no ~/.claude settings, hooks or MCPs leak in
+        # Isolation by default: nothing from ~/.claude leaks in. `account_connectors: true`
+        # in the role YAML switches to ["user"], which is the only way the CLI attaches the
+        # MCP servers your claude.ai account provides (Atlassian, Microsoft 365, …) — at the
+        # price of also loading ~/.claude/settings.json (permissions, hooks) into the run.
+        setting_sources=(["user"] if cfg.get("account_connectors") else []),
         hooks={
             "PreToolUse": [HookMatcher(hooks=[pre_tool])],
             "PostToolUse": [HookMatcher(hooks=[post_tool])],
@@ -221,19 +258,22 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
         "task": task, "task_id": meta.get("id"), "chain_id": meta.get("chain_id"),
         "iteration": meta.get("iteration"), "workdir": str(workdir), "model": cfg["model"],
         "allowed_tools": allowed, "contract": contract, "max_minutes": timeout_s / 60,
+        "account_connectors": bool(cfg.get("account_connectors")), "db_connectors": sorted(db_servers),
     })
     human(hlog, "=" * 76)
     human(hlog, f"TASK {meta.get('id', '?')}  chain {meta.get('chain_id', '?')}  "
                 f"round {meta.get('iteration', 1)}  [{cfg['name']}]")
-    human(hlog, f"  goal:    {shorten(task, 300)}")
+    human(hlog, f"  goal:    {shorten(task)}")
     human(hlog, f"  workdir: {workdir}")
 
     try:
         out = await asyncio.wait_for(
-            _run(task, options, cfg, log, hlog, max_len), timeout=timeout_s)
+            _run(task, options, cfg, log, hlog, max_len, meta), timeout=timeout_s)
     except asyncio.TimeoutError:
         log_event(log, "timeout", {"after_minutes": timeout_s / 60})
         human(hlog, f"  TIMEOUT after {timeout_s / 60:g} minutes — task will be marked failed")
+        if meta.get("id"):
+            close_logger(log)
         raise RuntimeError(
             f"agent '{cfg['name']}' exceeded its {timeout_s / 60:g} minute limit and was terminated")
 
@@ -245,7 +285,7 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
             structured = contracts.parse(contract, out["structured_raw"]).model_dump()
         except Exception as e:
             log_event(log, "contract_invalid", {"contract": contract, "error": str(e)[:2000]})
-            human(hlog, f"  CONTRACT INVALID: {shorten(e, 300)}")
+            human(hlog, f"  CONTRACT INVALID: {shorten(e)}")
     elif contract:
         log_event(log, "contract_missing", {"contract": contract, "subtype": out["subtype"]})
         human(hlog, "  CONTRACT MISSING: run ended without structured output")
@@ -253,11 +293,13 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
     result = {**out, "structured": structured, "contract": contract, "denied": denied}
     del result["structured_raw"]
     log_event(log, "response", {k: v for k, v in result.items() if k != "text"} | {"text": out["text"][:max_len]})
-    human(hlog, f"  RESULT:  {shorten(out['text'], 500)}")
+    human(hlog, f"  RESULT:  {shorten(out['text'])}")
+    if meta.get("id"):
+        close_logger(log)
     return result
 
 
-async def _run(task, options, cfg, log, hlog, max_len) -> dict:
+async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
     out = {"text": "", "structured_raw": None, "subtype": None, "is_error": False,
            "turns": 0, "duration_ms": 0, "cost_usd": 0.0, "model_usage": {}, "turn_log": []}
     async with ClaudeSDKClient(options=options) as client:
@@ -265,7 +307,21 @@ async def _run(task, options, cfg, log, hlog, max_len) -> dict:
         # Don't return from inside this loop: bailing out early closes the
         # stream while hook callbacks may still be in flight.
         async for msg in client.receive_response():
-            if isinstance(msg, AssistantMessage):
+            if isinstance(msg, SystemMessage):
+                if msg.subtype == "init":
+                    d = msg.data or {}
+                    servers = d.get("mcp_servers") or []
+                    tools = d.get("tools") or []
+                    log_event(log, "init", {"model": d.get("model"), "mcp_servers": servers, "tools": tools,
+                                            "permission_mode": d.get("permissionMode")})
+                    human(hlog, "  INIT:    " + ", ".join(f"{s_.get('name')}={s_.get('status')}" for s_ in servers) if servers else "  INIT:    no MCP servers")
+                    try:
+                        connectors.discover_from_init(tools, servers, {"task_id": meta.get("id"), "role": cfg["name"]})
+                    except Exception as e:  # never let bookkeeping take the run down
+                        log_event(log, "hook_error", {"where": "discover_from_init", "error": repr(e)})
+                else:
+                    log_event(log, "system", {"subtype": msg.subtype, "data": msg.data})
+            elif isinstance(msg, AssistantMessage):
                 # Per-message accounting: exact tokens from the API, cost from pricing.py.
                 u = msg.usage or {}
                 tools = [b.name for b in msg.content if isinstance(b, ToolUseBlock)]
@@ -280,10 +336,10 @@ async def _run(task, options, cfg, log, hlog, max_len) -> dict:
                 for block in msg.content:
                     if isinstance(block, ThinkingBlock) and cfg["logging"].get("log_thinking") and block.thinking.strip():
                         log_event(log, "thinking", {"text": block.thinking[:max_len]})
-                        human(hlog, f"  THINK:   {shorten(block.thinking, 240)}")
+                        human(hlog, f"  THINK:   {shorten(block.thinking)}")
                     elif isinstance(block, TextBlock):
                         log_event(log, "say", {"text": block.text[:max_len]})
-                        human(hlog, f"  SAY:     {shorten(block.text, 240)}")
+                        human(hlog, f"  SAY:     {shorten(block.text)}")
             elif isinstance(msg, ResultMessage):
                 out["text"] = msg.result or ""
                 out["structured_raw"] = getattr(msg, "structured_output", None)
