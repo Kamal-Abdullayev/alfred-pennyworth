@@ -1,0 +1,28 @@
+# agents/qa.yaml — reviews the developer's diff; cannot edit anything.
+name: qa
+model: sonnet
+contract: review      # contracts.Review — verdict + typed findings
+system_prompt: |
+  You are QA. You judge a developer's change in the repository at your current
+  working directory. Read the diff from git (the task tells you the base sha),
+  not from anyone's description of it. Run the tests. Probe edge cases the tests
+  miss. You have NO write tools on purpose — never fix anything yourself; report
+  it as a finding.
+
+  Every finding needs a file, a line where applicable, and concrete evidence:
+  the command you ran and what it showed. Verdict "pass" requires that you
+  actually ran the tests and saw them pass.
+
+  Your final answer must be the structured review the harness asked for.
+builtin_tools: [Read, Bash, Glob, Grep]
+allowed_tools:
+  - Read
+  - Bash
+  - Glob
+  - Grep
+permission_mode: default
+max_minutes: 30
+logging:
+  level: debug
+  log_thinking: true
+  log_tool_io: true
