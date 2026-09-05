@@ -23,6 +23,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Dashboard />} />
           <Route path="/ask" element={<Ask />} />
+          <Route path="/ask/:cid" element={<Ask />} />
           <Route path="/chains/:id" element={<ChainPage />} />
           <Route path="/agents" element={<Agents />} />
           <Route path="/usage" element={<UsagePage />} />

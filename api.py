@@ -180,15 +180,42 @@ def chain(chain_id: str):
 
 
 class JobIn(BaseModel):
-    body: str
+    body: str                          # the human's question / job, verbatim
     project_dir: str | None = None
     title: str | None = None
+    conversation_id: str | None = None # continue this Ask conversation; None = start a new one
+
+
+def _turn_answer_text(root: dict) -> str | None:
+    s = root.get("structured")
+    s = json.loads(s) if isinstance(s, str) and s else s
+    if not s:
+        return None
+    if s.get("kind") == "answer" and s.get("answer"):
+        return s["answer"].get("answer")
+    plan = s.get("plan") if "plan" in s else (s if "subtasks" in s else None)
+    return plan.get("summary") if plan else None
+
+
+def _conversation_context(cid: str, max_turns: int = 3, max_chars: int = 1800) -> str:
+    """Previous Q/A pairs, newest last, for the lead to read before the new question."""
+    turns = [t for t in board.conversation_turns(cid) if t["status"] == "done"][-max_turns:]
+    parts = []
+    for t in turns:
+        a = _turn_answer_text(t)
+        if not a:
+            continue
+        parts.append(f"Q: {(t.get('question') or t['body']).strip()[:600]}\nA: {a.strip()[:max_chars]}")
+    if not parts:
+        return ""
+    return ("\n\n--- Conversation so far (context only — answer the latest question above, "
+            "do not repeat earlier answers) ---\n" + "\n\n".join(parts))
 
 
 @app.post("/api/jobs")
 def create_job(job: JobIn):
-    body = job.body.strip()
-    if not body:
+    question = job.body.strip()
+    if not question:
         raise HTTPException(400, "empty job")
     project_dir = None
     if job.project_dir:
@@ -196,9 +223,57 @@ def create_job(job: JobIn):
         if not p.is_dir():
             raise HTTPException(400, f"project_dir does not exist: {p}")
         project_dir = str(p.resolve())
-    task_id = board.create_task(role="team_lead", title=(job.title or body)[:80], body=body,
-                                created_by="ui", project_dir=project_dir)
-    return {"task_id": task_id, "chain_id": task_id}
+    cid = job.conversation_id
+    if cid and not board.get_conversation(cid):
+        raise HTTPException(404, f"no conversation {cid}")
+    if not cid:
+        cid = board.create_conversation(job.title or question, project_dir)
+    body = question + _conversation_context(cid)
+    task_id = board.create_task(role="team_lead", title=(job.title or question)[:80], body=body,
+                                created_by="ui", project_dir=project_dir, conversation_id=cid, question=question)
+    return {"task_id": task_id, "chain_id": task_id, "conversation_id": cid}
+
+
+# ---------------------------------------------------------- conversations ----
+
+@app.get("/api/conversations")
+def conversations():
+    return board.list_conversations()
+
+
+@app.get("/api/conversations/{cid}")
+def conversation(cid: str):
+    c = board.get_conversation(cid)
+    if not c:
+        raise HTTPException(404, f"no conversation {cid}")
+    turns = []
+    with board.connect() as con:
+        costs = {r["chain_id"]: r["c"] for r in con.execute("SELECT chain_id, SUM(cost_usd) c FROM usage GROUP BY chain_id")}
+    for t in board.conversation_turns(cid):
+        root = _task(t)
+        turns.append({"chain_id": t["chain_id"], "question": t.get("question") or t["body"], "status": t["status"],
+                      "kind": _kind(root), "created_at": t["created_at"], "finished_at": t["finished_at"],
+                      "cost_usd": costs.get(t["chain_id"], 0.0), "structured": root["structured"], "result": t.get("result")})
+    return {**c, "turns": turns}
+
+
+@app.put("/api/conversations/{cid}")
+def conversation_rename(cid: str, body: dict):
+    if not board.get_conversation(cid):
+        raise HTTPException(404, f"no conversation {cid}")
+    title = str(body.get("title") or "").strip()
+    if not title:
+        raise HTTPException(400, "title required")
+    board.rename_conversation(cid, title)
+    return {"id": cid, "title": title}
+
+
+@app.delete("/api/conversations/{cid}")
+def conversation_delete(cid: str):
+    if not board.get_conversation(cid):
+        raise HTTPException(404, f"no conversation {cid}")
+    board.delete_conversation(cid)
+    return {"deleted": cid}
 
 
 class FindingIn(BaseModel):
@@ -542,6 +617,59 @@ def task_transcript(task_id: str, raw: int = 0):
     for e in evs:
         kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
     return {"task_id": task_id, "source": source, "count": len(evs), "kinds": kinds, "events": _cap(evs)}
+
+
+@app.get("/api/tasks/{task_id}/stream")
+async def task_stream(task_id: str):
+    """SSE: live view of one run. Replays what is already in logs/tasks/<task>.jsonl,
+    then tails it until the task reaches a terminal status. Events:
+      status {status, role}     board status changes
+      log    <jsonl event>      thinking / say / tool_call / tool_result / init / done / …
+      end    <chain detail>     the finished chain (kind, structured output, code_links)"""
+    async def gen():
+        path = LOGS / "tasks" / f"{task_id}.jsonl"
+        pos = 0
+        last_status = None
+        waited = 0.0
+
+        def read_new():
+            nonlocal pos
+            if not path.exists():
+                return []
+            with open(path, encoding="utf-8", errors="replace") as f:
+                f.seek(pos)
+                chunk = f.read()
+                pos = f.tell()
+            out = []
+            for line in chunk.splitlines():
+                try:
+                    e = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(e, dict) and e.get("kind"):
+                    out.append(e)
+            return out
+
+        while True:
+            t = board.get_task(task_id)
+            status = t["status"] if t else None
+            if status != last_status:
+                last_status = status
+                yield f"event: status\ndata: {json.dumps({'status': status, 'role': t['role'] if t else None, 'chain_id': t['chain_id'] if t else None})}\n\n"
+            for e in read_new():
+                yield f"event: log\ndata: {json.dumps(_cap(e, 6000), default=str)}\n\n"
+            if status in ("done", "failed", "stuck") or (t is None and waited > 5):
+                await asyncio.sleep(0.4)          # let the daemon finish its last writes
+                for e in read_new():
+                    yield f"event: log\ndata: {json.dumps(_cap(e, 6000), default=str)}\n\n"
+                detail = chain(t["chain_id"]) if t else {"error": "no such task"}
+                yield f"event: end\ndata: {json.dumps(detail, default=str)}\n\n"
+                return
+            yield ": ping\n\n"
+            await asyncio.sleep(0.7)
+            waited += 0.7
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.get("/api/logs")

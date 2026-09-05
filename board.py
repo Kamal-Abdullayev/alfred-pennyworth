@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     project_dir TEXT,                   -- absolute path the agent works in
     worktree    TEXT,                   -- worktree path for the chain (root task)
     base_sha    TEXT,                   -- sha the chain branched from (root task)
+    conversation_id TEXT,               -- Ask-page conversation (root task)
+    question    TEXT,                   -- the human's raw question (root task)
     iteration   INTEGER NOT NULL DEFAULT 1,
     created_by  TEXT NOT NULL,
     claimed_by  TEXT,
@@ -53,6 +55,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_role_status ON tasks(role, status);
 CREATE INDEX IF NOT EXISTS idx_tasks_chain ON tasks(chain_id);
 
+CREATE TABLE IF NOT EXISTS conversations (
+    id          TEXT PRIMARY KEY,
+    title       TEXT NOT NULL,
+    project_dir TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS findings (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     chain_id   TEXT NOT NULL,
@@ -176,6 +185,8 @@ def init():
             ("structured", "TEXT"),
             ("worktree", "TEXT"),
             ("base_sha", "TEXT"),
+            ("conversation_id", "TEXT"),   # Ask-page chat this chain belongs to
+            ("question", "TEXT"),          # the human's raw question (body may carry injected context)
         ):
             if name not in cols:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
@@ -186,16 +197,18 @@ def init():
 # ---------------------------------------------------------------- tasks ----
 
 def create_task(role, title, body, created_by, chain_id=None, iteration=1,
-                project_dir=None, parent_id=None):
+                project_dir=None, parent_id=None, conversation_id=None, question=None):
     task_id = str(uuid.uuid4())[:8]
     chain_id = chain_id or task_id
     with connect() as con:
         con.execute(
             "INSERT INTO tasks (id, chain_id, parent_id, role, title, body, iteration, "
-            "created_by, created_at, project_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_by, created_at, project_dir, conversation_id, question) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (task_id, chain_id, parent_id, role, title, body, iteration, created_by,
-             time.time(), project_dir),
+             time.time(), project_dir, conversation_id, question),
         )
+        if conversation_id:
+            con.execute("UPDATE conversations SET updated_at=? WHERE id=?", (time.time(), conversation_id))
     return task_id
 
 
@@ -305,6 +318,54 @@ def snapshot():
     with connect() as con:
         rows = con.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
+
+
+# -------------------------------------------------------- conversations ----
+
+def create_conversation(title, project_dir=None):
+    cid = str(uuid.uuid4())[:8]
+    with connect() as con:
+        con.execute("INSERT INTO conversations (id, title, project_dir, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (cid, title[:120], project_dir, time.time(), time.time()))
+    return cid
+
+
+def get_conversation(cid):
+    with connect() as con:
+        r = con.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
+        return dict(r) if r else None
+
+
+def list_conversations(limit=100):
+    """Newest first, with turn count and total cost of their chains."""
+    with connect() as con:
+        rows = con.execute(
+            "SELECT c.*, "
+            " (SELECT COUNT(*) FROM tasks t WHERE t.conversation_id=c.id AND t.role='team_lead') AS turns, "
+            " (SELECT COALESCE(SUM(u.cost_usd),0) FROM usage u WHERE u.chain_id IN "
+            "   (SELECT t.chain_id FROM tasks t WHERE t.conversation_id=c.id)) AS cost_usd, "
+            " (SELECT t.status FROM tasks t WHERE t.conversation_id=c.id AND t.role='team_lead' ORDER BY t.created_at DESC LIMIT 1) AS last_status "
+            "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def conversation_turns(cid):
+    """The root (team_lead) tasks of a conversation, oldest first."""
+    with connect() as con:
+        rows = con.execute("SELECT * FROM tasks WHERE conversation_id=? AND role='team_lead' ORDER BY created_at", (cid,)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def rename_conversation(cid, title):
+    with connect() as con:
+        con.execute("UPDATE conversations SET title=?, updated_at=? WHERE id=?", (title[:120], time.time(), cid))
+
+
+def delete_conversation(cid):
+    """Forgets the conversation; its chains stay on the board."""
+    with connect() as con:
+        con.execute("UPDATE tasks SET conversation_id=NULL WHERE conversation_id=?", (cid,))
+        con.execute("DELETE FROM conversations WHERE id=?", (cid,))
 
 
 # ------------------------------------------------------------- findings ----

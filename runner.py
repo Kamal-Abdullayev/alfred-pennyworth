@@ -319,7 +319,8 @@ async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
                         connectors.discover_from_init(tools, servers, {"task_id": meta.get("id"), "role": cfg["name"]})
                     except Exception as e:  # never let bookkeeping take the run down
                         log_event(log, "hook_error", {"where": "discover_from_init", "error": repr(e)})
-                else:
+                elif not str(msg.subtype).startswith("hook_"):
+                    # hook_started / hook_response fire for every hook call — noise, not signal
                     log_event(log, "system", {"subtype": msg.subtype, "data": msg.data})
             elif isinstance(msg, AssistantMessage):
                 # Per-message accounting: exact tokens from the API, cost from pricing.py.

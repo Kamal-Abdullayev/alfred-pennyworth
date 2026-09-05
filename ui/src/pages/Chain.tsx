@@ -1,43 +1,14 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { api, subscribe, fmtCost, fmtTime, leadOutput, type ChainDetail, type Task, type Answer, type CodeRef, type Plan, type Turn, type CodeLink } from '../api'
+import { api, subscribe, fmtCost, fmtTime, leadOutput, type ChainDetail, type Task, type Answer, type Turn } from '../api'
 import { TranscriptPanel } from '../components/Transcript'
+import { AnswerContent, CodeBlock as _CB, Markdown, PlanContent } from '../components/Answer'
+void _CB
 
 type Impl = { status: string; summary: string; branch: string | null; commit_sha: string | null; files_changed: string[]; approach: string | null; verification: { commands_run: string[]; result: string; notes: string }; open_questions: string[]; blocked: { reason: string; conflict_detail: string; needs: string[] } | null }
 type Review = { verdict: string; findings: { file: string; line: number | null; severity: string; claim: string; evidence: string }[]; tests_run: { name: string; status: string; output_excerpt: string }[]; edge_cases_probed: string[] }
 
 // ---------------------------------------------------------------- answers ----
-
-function CodeBlock({ code: r, link }: { code: CodeRef; link: CodeLink | undefined }) {
-  const [copied, setCopied] = useState(false)
-  const lines = r.snippet.replace(/\n$/, '').split('\n')
-  const copyText = link?.abs ? `${link.abs}:${r.start_line}` : `${r.path}:${r.start_line}`
-  const copy = () => { navigator.clipboard?.writeText(copyText).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }) }
-  return (
-    <div className="coderef">
-      <div className="hdr">
-        <div>
-          {r.symbol && <span className="sym mono">{r.symbol}</span>}
-          <div className="path mono">{r.path}:{r.start_line}{r.end_line !== r.start_line ? `-${r.end_line}` : ''} <span className="muted">· {r.language}</span></div>
-        </div>
-        <div className="actions">
-          {link?.idea && <a className="btn-link" href={link.idea} title={`Open ${link.abs} at line ${r.start_line} in IntelliJ`}>Open in IntelliJ</a>}
-          {link?.web && <a className="btn-link" href={link.web} target="_blank" rel="noreferrer" title="Open these lines in GitLab">Open in GitLab</a>}
-          {!link?.idea && !link?.web && <span className="muted small" title="No local checkout and no GitLab project recorded for this answer">not openable locally</span>}
-          <button className="btn-link" onClick={copy}>{copied ? 'copied' : 'copy path'}</button>
-        </div>
-      </div>
-      <pre>
-        {lines.map((l, i) => (
-          <div className="line" key={i}><span className="ln">{r.start_line + i}</span><span className="src">{l || ' '}</span></div>
-        ))}
-      </pre>
-      {r.why && <div className="why">{r.why}</div>}
-    </div>
-  )
-}
 
 function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
   const root = d.root
@@ -55,25 +26,7 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
       <div className="card"><pre style={{ margin: 0, whiteSpace: 'pre-wrap', font: 'inherit' }}>{root.body}</pre></div>
 
       <h2>Answer</h2>
-      <div className="card md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{a.answer}</ReactMarkdown></div>
-
-      {a.code.length > 0 && (
-        <>
-          <h2>Code ({a.code.length})</h2>
-          {a.code.map((c, i) => <CodeBlock key={i} code={c} link={d.code_links[i]} />)}
-        </>
-      )}
-
-      {a.citations.length > 0 && (
-        <>
-          <h2>Sources</h2>
-          <div className="card" style={{ padding: 0 }}>
-            <table><thead><tr><th>Source</th><th>Ref</th></tr></thead>
-              <tbody>{a.citations.map((c, i) => <tr key={i}><td className="mono small">{c.url ? <a href={c.url} target="_blank" rel="noreferrer">{c.source}</a> : c.source}</td><td className="small">{c.ref}</td></tr>)}</tbody>
-            </table>
-          </div>
-        </>
-      )}
+      <div className="card"><AnswerContent a={a} links={d.code_links} /></div>
 
       <details style={{ marginTop: 18 }}><summary className="small">run details — {fmtCost(d.cost_usd)}</summary>
         <TurnsTable turns={d.turns} />
@@ -110,28 +63,12 @@ function TurnsTable({ turns }: { turns: Turn[] }) {
 
 // -------------------------------------------------------------- implement ----
 
-function PlanView({ p }: { p: Plan }) {
-  return (
-    <div>
-      <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{p.summary}</ReactMarkdown></div>
-      <ul className="plain">
-        {p.subtasks?.map((st) => (
-          <li key={st.id}><b>{st.title}</b> <span className="muted small">({st.id}{st.depends_on?.length ? `, after ${st.depends_on.join(', ')}` : ''})</span>
-            <div className="small">{st.description}</div>
-            <ol className="small muted">{st.acceptance?.map((a, i) => <li key={i}>{a}</li>)}</ol>
-          </li>
-        ))}
-      </ul>
-    </div>
-  )
-}
-
 function Structured({ task }: { task: Task }) {
   if (!task.structured) return <span className="muted small">{task.status === 'done' ? 'no structured output' : ''}</span>
   if (task.role === 'team_lead') {
     const lo = leadOutput(task.structured)
-    if (lo?.kind === 'plan' && lo.plan) return <PlanView p={lo.plan} />
-    if (lo?.kind === 'answer' && lo.answer) return <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{lo.answer.answer}</ReactMarkdown></div>
+    if (lo?.kind === 'plan' && lo.plan) return <PlanContent p={lo.plan} />
+    if (lo?.kind === 'answer' && lo.answer) return <Markdown text={lo.answer.answer} />
     return <span className="muted small">unrecognised lead output</span>
   }
   if (task.role === 'developer') {

@@ -13,6 +13,16 @@ export default function Logs() {
   const [filter, setFilter] = useState('all')
   const [task, setTask] = useState<string>('all')
   const [raw, setRaw] = useState<string | null>(null)
+  const [file, setFile] = useState<string | null>(null)
+  const [fileEvents, setFileEvents] = useState<Ev[] | null>(null)
+  const [fileText, setFileText] = useState<{ total_lines: number; lines: string[] } | null>(null)
+  const [fileFilter, setFileFilter] = useState('all')
+
+  function openFile(name: string) {
+    setFile(name); setFileEvents(null); setFileText(null); setFileFilter('all')
+    if (name.endsWith('.jsonl')) api.logEvents(name, 800).then((r) => setFileEvents(r.events)).catch(() => setFileEvents([]))
+    else api.logFile(name, 800).then(setFileText).catch(() => setFileText({ total_lines: 0, lines: ['(could not read file)'] }))
+  }
 
   const roles = files.filter((f) => f.name.endsWith('.jsonl') && !f.name.startsWith('tasks/')).map((f) => f.name.replace('.jsonl', ''))
   const loadFlow = () => api.flowRows(300).then((r) => setFlow(r.rows)).catch(() => {})
@@ -70,12 +80,37 @@ export default function Logs() {
         </>
       )}
 
-      <h2>Files</h2>
-      <div className="card" style={{ padding: 0 }}>
-        <table><thead><tr><th>File</th><th>Size</th><th>Modified</th></tr></thead>
-          <tbody>{files.map((f) => <tr key={f.name}><td className="mono small">{f.name}</td><td className="mono small">{fmt(f.bytes)}</td><td className="muted small">{new Date(f.mtime * 1000).toLocaleString()}</td></tr>)}
-          {files.length === 0 && <tr><td colSpan={3} className="muted">logs/ is empty</td></tr>}</tbody>
-        </table>
+      <h2>Files — click one to read it here</h2>
+      <div className="grid cols-2">
+        <div className="card" style={{ padding: 0 }}>
+          <table><thead><tr><th>File</th><th>What it is</th><th>Size</th><th>Modified</th></tr></thead>
+            <tbody>{files.map((f) => (
+              <tr key={f.name} className="row" onClick={() => openFile(f.name)} style={{ fontWeight: file === f.name ? 700 : 400 }}>
+                <td className="mono small">{f.name}</td>
+                <td className="muted small">{f.name === 'flow.log' ? 'claims, finishes, handovers' : f.name.startsWith('tasks/') ? 'one run, every event' : f.name.endsWith('.jsonl') ? 'a role, every event, all runs' : 'human-readable role log'}</td>
+                <td className="mono small">{fmt(f.bytes)}</td><td className="muted small">{new Date(f.mtime * 1000).toLocaleString()}</td>
+              </tr>
+            ))}
+            {files.length === 0 && <tr><td colSpan={4} className="muted">logs/ is empty</td></tr>}</tbody>
+          </table>
+        </div>
+        <div>
+          {!file && <div className="card muted small">Select a file. JSONL files open as a readable event list; .log files as text.</div>}
+          {file && (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+                <b className="mono small">{file}</b>
+                <span className="actions">
+                  {fileEvents && FILTERS.map((k) => <button key={k} className="btn-link" style={{ fontWeight: fileFilter === k ? 700 : 400 }} onClick={() => setFileFilter(k)}>{k}</button>)}
+                  <a className="btn-link" href={`/api/logs/file?name=${encodeURIComponent(file)}&tail=0`} target="_blank" rel="noreferrer">raw</a>
+                </span>
+              </div>
+              {fileEvents && <EventList events={filterEvents(fileEvents, fileFilter)} showTask={!file.startsWith('tasks/')} />}
+              {fileText && <pre className="log" style={{ maxHeight: 520 }}>{fileText.lines.length ? fileText.lines.join('\n') : '(empty file)'}</pre>}
+              {!fileEvents && !fileText && <div className="muted small">loading…</div>}
+            </>
+          )}
+        </div>
       </div>
     </>
   )

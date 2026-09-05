@@ -72,6 +72,9 @@ export type LogEntry = { id: number; connector: string; level: 'info' | 'warn' |
 export type TranscriptEvent = { ts: string; kind: string; data: Record<string, unknown> }
 export type Transcript = { task_id: string; source: string | null; count: number; kinds: Record<string, number>; events: TranscriptEvent[] }
 export type LogFile = { name: string; bytes: number; mtime: number }
+export type Conversation = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: number; cost_usd: number; last_status: string | null }
+export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null }
+export type ConversationDetail = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: ConversationTurn[] }
 export type Connector = {
   name: string; template: string | null; kind: 'stdio' | 'http' | 'sse' | 'claude-ai'; command: string | null; args: string[]; url: string | null
   provider: 'configured' | 'claude-account'; masked_config: Record<string, unknown> | null
@@ -114,10 +117,24 @@ export const api = {
   logFile: (name: string, tail = 500) => j<{ name: string; total_lines: number; lines: string[] }>(`/api/logs/file?name=${encodeURIComponent(name)}&tail=${tail}`),
   discoverConnectors: () => j<{ account_servers: string[]; tools: Record<string, string[]>; connectors: Connector[] }>('/api/connectors/discover', { method: 'POST' }),
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
-  createJob: (body: string, project_dir?: string) =>
-    j<{ task_id: string; chain_id: string }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null }) }),
+  createJob: (body: string, project_dir?: string, conversation_id?: string) =>
+    j<{ task_id: string; chain_id: string; conversation_id: string }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
+  conversations: () => j<Conversation[]>('/api/conversations'),
+  conversation: (id: string) => j<ConversationDetail>(`/api/conversations/${id}`),
+  renameConversation: (id: string, title: string) => j<unknown>(`/api/conversations/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
+  deleteConversation: (id: string) => j<unknown>(`/api/conversations/${id}`, { method: 'DELETE' }),
   addFinding: (chain: string, f: { file: string; line: number | null; severity: string; claim: string; evidence: string }) =>
     j<{ task_id: string; iteration: number }>(`/api/chains/${chain}/findings`, { method: 'POST', body: JSON.stringify(f) }),
+}
+
+/** Live view of one run: replay + tail of its event log, then the finished chain. */
+export function streamTask(taskId: string, h: { status?: (s: { status: string | null; role: string | null; chain_id: string | null }) => void; log?: (e: TranscriptEvent) => void; end?: (d: ChainDetail) => void; error?: () => void }) {
+  const es = new EventSource(`/api/tasks/${taskId}/stream`)
+  es.addEventListener('status', (e) => h.status?.(JSON.parse((e as MessageEvent).data)))
+  es.addEventListener('log', (e) => h.log?.(JSON.parse((e as MessageEvent).data)))
+  es.addEventListener('end', (e) => { h.end?.(JSON.parse((e as MessageEvent).data)); es.close() })
+  es.onerror = () => { h.error?.() }
+  return () => es.close()
 }
 
 /** Subscribe to the board's SSE stream. Returns an unsubscribe function. */
