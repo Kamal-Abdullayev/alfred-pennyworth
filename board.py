@@ -37,7 +37,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     role        TEXT NOT NULL,          -- who should pick this up (agents/<role>.yaml)
     title       TEXT NOT NULL,
     body        TEXT NOT NULL,          -- full instructions for the agent
-    status      TEXT NOT NULL DEFAULT 'open',  -- open | claimed | done | failed | stuck | closed
+    status      TEXT NOT NULL DEFAULT 'open',  -- open | claimed | done | failed | stuck | closed | cancelled
+    stop_requested INTEGER NOT NULL DEFAULT 0,
     result      TEXT,                   -- agent's final text
     structured  TEXT,                   -- agent's validated contract output (JSON)
     project_dir TEXT,                   -- absolute path the agent works in
@@ -201,6 +202,7 @@ def init():
             ("base_sha", "TEXT"),
             ("conversation_id", "TEXT"),   # Ask-page chat this chain belongs to
             ("question", "TEXT"),          # the human's raw question (body may carry injected context)
+            ("stop_requested", "INTEGER NOT NULL DEFAULT 0"),  # human pressed Stop while it was running
         ):
             if name not in cols:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
@@ -287,6 +289,44 @@ def park_chain(chain_id, reason):
             if root:
                 con.execute("UPDATE tasks SET result=COALESCE(result,'') || ' | parked: ' || ? WHERE id=?", (reason, root["id"]))
                 con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"parked:{chain_id}", json.dumps(reason)))
+
+
+def request_stop(task_id):
+    """Human action. Queued task: cancelled at once. Running task: flagged; the runner
+    interrupts the agent within a couple of seconds and the daemon marks it cancelled."""
+    with connect() as con:
+        t = con.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not t:
+            return None
+        if t["status"] == "open":
+            con.execute("UPDATE tasks SET status='cancelled', result=COALESCE(result,'') || ' | cancelled before start', finished_at=? WHERE id=?",
+                        (time.time(), task_id))
+            return "cancelled"
+        if t["status"] == "claimed":
+            con.execute("UPDATE tasks SET stop_requested=1 WHERE id=?", (task_id,))
+            return "stopping"
+        return t["status"]
+
+
+def stop_requested(task_id):
+    with connect() as con:
+        r = con.execute("SELECT stop_requested FROM tasks WHERE id=?", (task_id,)).fetchone()
+        return bool(r and r["stop_requested"])
+
+
+def cancel_task(task_id, note="stopped by human"):
+    with connect() as con:
+        con.execute("UPDATE tasks SET status='cancelled', result=COALESCE(result,'') || ' | ' || ?, finished_at=? WHERE id=?",
+                    (note, time.time(), task_id))
+
+
+def stop_chain(chain_id):
+    """Cancel everything queued, flag everything running, and close the chain."""
+    with connect() as con:
+        rows = con.execute("SELECT id, status FROM tasks WHERE chain_id=? AND status IN ('open','claimed')", (chain_id,)).fetchall()
+    outcome = {r["id"]: request_stop(r["id"]) for r in rows}
+    close_chain(chain_id, "stopped by human")
+    return outcome
 
 
 def requeue_chain(chain_id):

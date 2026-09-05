@@ -75,35 +75,38 @@ function Steps({ steps, live }: { steps: Step[]; live: boolean }) {
   )
 }
 
-/** The Excalidraw MCP converts Mermaid inside a connected browser and only exports images
- *  through one. This keeps the canvas frontend loaded (collapsed to a strip) for as long as the
- *  Ask page is open, so the lead can draw while you watch and snapshots include a PNG. */
-function CanvasKeeper({ url, configured }: { url: string; configured: boolean }) {
-  const [open, setOpen] = useState(false)
+/** Keeps the Excalidraw frontend connected (invisibly) while the Ask page is open, so the
+ *  lead's Mermaid→canvas conversion and image exports work. No UI of its own. */
+function CanvasConnection({ url, configured }: { url: string; configured: boolean }) {
   if (!configured) return null
+  return <iframe src={url} title="Excalidraw connection" aria-hidden style={{ position: 'fixed', width: 1, height: 1, opacity: 0, pointerEvents: 'none', bottom: 0, right: 0, border: 0 }} />
+}
+
+/** Shown under a turn only when that turn drew on the canvas. */
+function TurnCanvas({ url }: { url: string }) {
+  const [open, setOpen] = useState(false)
   return (
-    <div className="card" style={{ padding: open ? 8 : '6px 12px', marginBottom: 12 }}>
-      <div className="actions" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
-        <span className="small"><span className="pill answered">canvas</span> Excalidraw is connected through this page{open ? '' : ' (collapsed)'}</span>
-        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'collapse' : 'show live canvas'}</button>
+    <div style={{ marginTop: 8 }}>
+      <span className="actions" style={{ alignItems: 'center' }}>
+        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'hide live canvas' : 'show live canvas'}</button>
         <a className="btn-link" href={url} target="_blank" rel="noreferrer">open in a tab</a>
-        <button className="btn-link" onClick={() => api.canvasClear().catch(() => {})} title="wipe the shared canvas">clear canvas</button>
-        <span className="muted small">keep this page open while the lead draws; saved scenes live under each answer</span>
-      </div>
-      <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: open ? 600 : 1, opacity: open ? 1 : 0, border: open ? '1px solid var(--border)' : 0, borderRadius: 8, marginTop: open ? 8 : 0, background: '#fff', display: 'block' }} />
+        <span className="muted small">the lead drew on the shared canvas</span>
+      </span>
+      {open && <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: 600, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, background: '#fff', display: 'block' }} />}
     </div>
   )
 }
 
-function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void }) {
+function AssistantTurn({ turn, live, onNeedEvents, canvasUrl, onStop }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void; canvasUrl: string; onStop: () => Promise<void> }) {
+  const [stopping, setStopping] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = toSteps(live.events)
-  const finished = ['done', 'failed', 'stuck'].includes(turn.status) || !!live.detail
+  const finished = ['done', 'failed', 'stuck', 'cancelled', 'closed'].includes(turn.status) || !!live.detail
   const running = !finished && !live.error
   const lead = leadOutput(live.detail?.root.structured ?? turn.structured)
   const links = live.detail?.code_links ?? []
   const last = steps[steps.length - 1]
-  const drew = live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
+  const drew = !!turn.drew || live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
   const headline = running
     ? (live.status === 'open' || turn.status === 'open' ? 'waiting for the team lead to pick this up…' : 'team lead is working…')
     : `${lead?.kind === 'answer' ? 'answered' : turn.status} · ${live.eventsLoaded ? `${steps.length} steps` : 'show what it did'}`
@@ -115,11 +118,14 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
         <span>{headline}</span>
         {running && last && !showSteps && <span className="mono muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 520 }}>· {last.lab} {last.txt}</span>}
         <span className="muted">{showSteps ? '▾' : '▸'}</span>
+        {running && <button className="btn-link" style={{ marginLeft: 'auto', borderColor: 'var(--bad)', color: 'var(--bad)' }} disabled={stopping}
+          onClick={async (e) => { e.stopPropagation(); setStopping(true); try { await onStop() } finally { setStopping(false) } }}>{stopping ? 'stopping…' : '■ stop'}</button>}
       </div>
+      {drew && <TurnCanvas url={canvasUrl} />}
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
-      {drew && <div className="small muted" style={{ marginTop: 8 }}>drew on the shared canvas — see the canvas strip at the top of this page, or "show on canvas" under the answer</div>}
+
       {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
           {dispatched
@@ -129,7 +135,8 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
           {dispatched && <div className="small">Follow the developers and QA on the <a href={`/chains/${turn.chain_id}`}>chain page</a>.</div>}
         </div>
       ) })()}
-      {finished && !lead && turn.status !== 'done' && <div className="err small">The run ended with status <b>{turn.status}</b>{turn.result ? `: ${turn.result.slice(0, 400)}` : ''}</div>}
+      {finished && turn.status === 'cancelled' && <div className="small" style={{ color: 'var(--warn)', marginTop: 6 }}>■ stopped by you{turn.result?.includes('before start') ? ' before it started' : ''} — cost so far {fmtCost(live.detail?.cost_usd ?? turn.cost_usd)}</div>}
+      {finished && !lead && !['done', 'cancelled'].includes(turn.status) && <div className="err small">The run ended with status <b>{turn.status}</b>{turn.result ? `: ${turn.result.slice(0, 400)}` : ''}</div>}
       {finished && <div className="meta">{fmtCost(live.detail?.cost_usd ?? turn.cost_usd)} · <a href={`/chains/${turn.chain_id}`}>full chain, transcript and per-turn cost</a></div>}
     </div>
   )
@@ -235,13 +242,14 @@ export default function Ask() {
           {cid && <span className="actions"><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
         </div>
         {err && <p className="err">{err}</p>}
-        <CanvasKeeper url={canvas.url} configured={canvas.configured} />
+        <CanvasConnection url={canvas.url} configured={canvas.configured} />
         <div className="chat">
           {!cid && <div className="card muted small">Ask the team lead anything about your systems — a ticket, a merge request, how something works, why a pipeline is red. You'll see what it reads and runs while it works, then the answer with the code it relied on. Give a repository path below if the question is about local code; otherwise it reads through GitLab. Follow-ups in the same conversation carry the earlier answers as context.</div>}
           {turns.map((t) => (
             <div key={t.chain_id} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="bubble user">{t.question}<div className="meta">{new Date(t.created_at * 1000).toLocaleString()} · <a href={`/chains/${t.chain_id}`} className="mono">{t.chain_id}</a></div></div>
-              <AssistantTurn turn={t} live={lives[t.chain_id] ?? empty()} onNeedEvents={() => loadEvents(t.chain_id)} />
+              <AssistantTurn turn={t} live={lives[t.chain_id] ?? empty()} onNeedEvents={() => loadEvents(t.chain_id)} canvasUrl={canvas.url}
+                onStop={async () => { await api.stopTask(t.chain_id); setTurns((ts) => ts.map((x) => x.chain_id === t.chain_id && x.status === 'open' ? { ...x, status: 'cancelled', result: 'cancelled before start' } : x)) }} />
             </div>
           ))}
           <div ref={bottom} />

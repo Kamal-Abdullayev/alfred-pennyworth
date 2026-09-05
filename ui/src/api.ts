@@ -80,7 +80,7 @@ export type TranscriptEvent = { ts: string; kind: string; data: Record<string, u
 export type Transcript = { task_id: string; source: string | null; count: number; kinds: Record<string, number>; events: TranscriptEvent[] }
 export type LogFile = { name: string; bytes: number; mtime: number }
 export type Conversation = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: number; cost_usd: number; last_status: string | null }
-export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null }
+export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null; drew?: boolean }
 export type ConversationDetail = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: ConversationTurn[] }
 export type Connector = {
   name: string; template: string | null; kind: 'stdio' | 'http' | 'sse' | 'claude-ai'; command: string | null; args: string[]; url: string | null
@@ -120,6 +120,8 @@ export const api = {
   setConnectorRoles: (name: string, roles: string[]) => j<{ roles: string[] }>(`/api/connectors/${name}/roles`, { method: 'PUT', body: JSON.stringify({ roles }) }),
   setToolMutates: (name: string, tool: string, mutates: boolean) => j<unknown>(`/api/connectors/${name}/tools/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify({ mutates }) }),
   canvas: () => j<{ url: string; configured: boolean }>('/api/canvas'),
+  stopTask: (id: string) => j<{ task_id: string; result: string }>(`/api/tasks/${id}/stop`, { method: 'POST' }),
+  stopChain: (id: string) => j<{ chain_id: string; tasks: Record<string, string> }>(`/api/chains/${id}/stop`, { method: 'POST' }),
   canvasShow: (task_id: string, name: string) => j<{ ok: boolean; message: string }>('/api/canvas/show', { method: 'POST', body: JSON.stringify({ task_id, name }) }),
   canvasClear: () => j<{ ok: boolean }>('/api/canvas/clear', { method: 'POST' }),
   setTrustWrites: (name: string, trust: boolean) => j<unknown>(`/api/connectors/${name}/trust_writes`, { method: 'PUT', body: JSON.stringify({ trust_writes: trust }) }),

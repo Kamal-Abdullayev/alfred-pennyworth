@@ -324,6 +324,10 @@ async def main(role, ephemeral=False, idle_exit_s=90):
                     meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"]},
                 )
                 record_usage(task, role, res)
+                if res.get("cancelled"):
+                    board.cancel_task(task["id"])
+                    flow(f"[{role}] STOPPED {task['id']} by human after est≈${res.get('cost_usd', 0):.4f}")
+                    continue
                 if res.get("is_error") or res.get("subtype") not in (None, "success"):
                     board.fail(task["id"], res.get("text", ""), res.get("structured"))
                     board.park_chain(task["chain_id"], f"{role} run ended with {res.get('subtype')}")

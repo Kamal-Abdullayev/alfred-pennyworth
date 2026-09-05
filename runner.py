@@ -22,6 +22,7 @@ from claude_agent_sdk import (
     HookMatcher,
 )
 
+import board
 import connectors
 import contracts
 import pricing
@@ -296,6 +297,9 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
         opt_kwargs["max_turns"] = cfg["max_turns"]
     if contract:
         opt_kwargs["output_format"] = {"type": "json_schema", "schema": contracts.schema_for(contract)}
+    # A single big tool result (e.g. Read of a large file, GitLab MR changes) can exceed the
+    # SDK's default 1 MB JSON frame and kill the run mid-way; allow 32 MB.
+    opt_kwargs["max_buffer_size"] = 32 * 1024 * 1024
     options = ClaudeAgentOptions(**opt_kwargs)
 
     timeout_s = float(cfg.get("max_minutes", 15)) * 60
@@ -356,9 +360,26 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
 
 async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
     out = {"text": "", "structured_raw": None, "subtype": None, "is_error": False,
-           "turns": 0, "duration_ms": 0, "cost_usd": 0.0, "model_usage": {}, "turn_log": []}
+           "turns": 0, "duration_ms": 0, "cost_usd": 0.0, "model_usage": {}, "turn_log": [], "cancelled": False}
     async with ClaudeSDKClient(options=options) as client:
         await client.query(task)
+
+        async def stop_watch():
+            """A human pressed Stop in the UI: interrupt the agent mid-turn."""
+            tid = meta.get("id")
+            while tid:
+                await asyncio.sleep(2)
+                try:
+                    if board.stop_requested(tid):
+                        out["cancelled"] = True
+                        log_event(log, "interrupted", {"by": "human"})
+                        human(hlog, "  STOP:    interrupted by human")
+                        await client.interrupt()
+                        return
+                except Exception as e:  # noqa: BLE001
+                    log_event(log, "hook_error", {"where": "stop_watch", "error": repr(e)})
+                    return
+        watcher = asyncio.create_task(stop_watch())
         # Don't return from inside this loop: bailing out early closes the
         # stream while hook callbacks may still be in flight.
         async for msg in client.receive_response():
@@ -418,4 +439,5 @@ async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
                                         "is_error": out["is_error"], "duration_ms": out["duration_ms"],
                                         "cost_usd": out["cost_usd"], "model_usage": out["model_usage"]})
                 human(hlog, f"  DONE:    {out['turns']} turns, {out['duration_ms'] / 1000:.0f}s, est≈${out['cost_usd']:.4f}")
+        watcher.cancel()
     return out
