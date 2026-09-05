@@ -45,6 +45,11 @@ export default function UsagePage() {
           </BarChart>
         </ResponsiveContainer>
       </div>
+      <h2>Per request</h2>
+      <p className="muted small" style={{ marginTop: -4 }}>What each thing you asked for cost, all its agent runs included.</p>
+      <div className="card" style={{ padding: 0 }}><table><thead><tr><th>Request</th><th>Runs</th><th>In+cache</th><th>Out</th><th>Cost</th></tr></thead>
+        <tbody>{u.by_chain.map((c) => <tr key={c.chain_id}><td><a href={`/chains/${c.chain_id}`}>{c.title.slice(0, 70)}</a><div className="muted small mono">{c.chain_id}</div></td><td>{c.runs}</td><td className="mono">{c.in_tok.toLocaleString()}</td><td className="mono">{c.out_tok.toLocaleString()}</td><td className="mono">{fmtCost(c.cost)}</td></tr>)}
+        {u.by_chain.length === 0 && <tr><td colSpan={5} className="muted">nothing in this window</td></tr>}</tbody></table></div>
       <div className="grid cols-2">
         <div>
           <h2>By role</h2>

@@ -85,6 +85,56 @@ CREATE TABLE IF NOT EXISTS usage (
     created_at        REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_chain ON usage(chain_id);
+
+CREATE TABLE IF NOT EXISTS turns (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_id            TEXT NOT NULL,
+    chain_id           TEXT NOT NULL,
+    role               TEXT NOT NULL,
+    turn_index         INTEGER NOT NULL,
+    model              TEXT NOT NULL,
+    message_id         TEXT,
+    input_tokens       INTEGER NOT NULL,
+    output_tokens      INTEGER NOT NULL,
+    cache_read_tokens  INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    est_cost_usd       REAL NOT NULL,     -- pricing.py list-price estimate for this message
+    tools              TEXT NOT NULL,     -- JSON list of tool names called in this message
+    text_chars         INTEGER NOT NULL,
+    created_at         REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_turns_chain ON turns(chain_id);
+
+CREATE TABLE IF NOT EXISTS connectors (
+    name             TEXT PRIMARY KEY,
+    template         TEXT,
+    kind             TEXT NOT NULL,      -- stdio | http | sse
+    command          TEXT,
+    args             TEXT,               -- JSON list
+    url              TEXT,
+    env              TEXT,               -- JSON {VAR: {"secret": bool, "value": str}}
+    headers          TEXT,               -- JSON {Header: {"secret": bool, "value": str}}
+    enabled          INTEGER NOT NULL DEFAULT 1,
+    note             TEXT,
+    last_test_at     REAL,
+    last_test_status TEXT,               -- ok | failed
+    last_test_error  TEXT,
+    created_at       REAL NOT NULL,
+    updated_at       REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS connector_tools (
+    connector   TEXT NOT NULL,
+    tool        TEXT NOT NULL,
+    description TEXT,
+    mutates     INTEGER NOT NULL,        -- 1 = never allowed to an agent
+    source      TEXT NOT NULL,           -- annotation | heuristic | user
+    PRIMARY KEY (connector, tool)
+);
+CREATE TABLE IF NOT EXISTS connector_roles (
+    connector TEXT NOT NULL,
+    role      TEXT NOT NULL,
+    PRIMARY KEY (connector, role)
+);
 """
 
 
@@ -293,6 +343,115 @@ def chain_cost(chain_id):
         row = con.execute("SELECT COALESCE(SUM(cost_usd),0) c FROM usage WHERE chain_id=?",
                           (chain_id,)).fetchone()
         return row["c"]
+
+
+# ---------------------------------------------------------------- turns ----
+
+def record_turns(task_id, chain_id, role, turns):
+    if not turns:
+        return
+    with connect() as con:
+        con.executemany(
+            "INSERT INTO turns (task_id, chain_id, role, turn_index, model, message_id, input_tokens, "
+            "output_tokens, cache_read_tokens, cache_write_tokens, est_cost_usd, tools, text_chars, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [(task_id, chain_id, role, t["turn_index"], t["model"], t.get("message_id"),
+              t["input_tokens"], t["output_tokens"], t["cache_read_tokens"], t["cache_write_tokens"],
+              t["est_cost_usd"], json.dumps(t.get("tools") or []), t.get("text_chars", 0), time.time())
+             for t in turns],
+        )
+
+
+def turns_for_chain(chain_id):
+    with connect() as con:
+        rows = con.execute("SELECT * FROM turns WHERE chain_id=? ORDER BY task_id, turn_index",
+                           (chain_id,)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r); d["tools"] = json.loads(d["tools"] or "[]"); out.append(d)
+        return out
+
+
+# ----------------------------------------------------------- connectors ----
+
+def upsert_connector(row):
+    now = time.time()
+    with connect() as con:
+        con.execute(
+            "INSERT INTO connectors (name, template, kind, command, args, url, env, headers, enabled, note, created_at, updated_at) "
+            "VALUES (:name, :template, :kind, :command, :args, :url, :env, :headers, :enabled, :note, :now, :now) "
+            "ON CONFLICT(name) DO UPDATE SET template=excluded.template, kind=excluded.kind, command=excluded.command, "
+            "args=excluded.args, url=excluded.url, env=excluded.env, headers=excluded.headers, enabled=excluded.enabled, "
+            "note=excluded.note, updated_at=excluded.updated_at",
+            {"name": row["name"], "template": row.get("template"), "kind": row["kind"], "command": row.get("command"),
+             "args": row.get("args") or "[]", "url": row.get("url"), "env": row.get("env") or "{}",
+             "headers": row.get("headers") or "{}", "enabled": int(row.get("enabled", 1)), "note": row.get("note"), "now": now},
+        )
+
+
+def get_connector(name):
+    with connect() as con:
+        r = con.execute("SELECT * FROM connectors WHERE name=?", (name,)).fetchone()
+        return dict(r) if r else None
+
+
+def list_connectors():
+    with connect() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM connectors ORDER BY name")]
+
+
+def delete_connector(name):
+    with connect() as con:
+        con.execute("DELETE FROM connector_tools WHERE connector=?", (name,))
+        con.execute("DELETE FROM connector_roles WHERE connector=?", (name,))
+        con.execute("DELETE FROM connectors WHERE name=?", (name,))
+
+
+def set_connector_enabled(name, enabled):
+    with connect() as con:
+        con.execute("UPDATE connectors SET enabled=?, updated_at=? WHERE name=?", (int(enabled), time.time(), name))
+
+
+def set_connector_test(name, status, error):
+    with connect() as con:
+        con.execute("UPDATE connectors SET last_test_at=?, last_test_status=?, last_test_error=? WHERE name=?",
+                    (time.time(), status, error, name))
+
+
+def set_connector_tools(name, tools):
+    with connect() as con:
+        con.execute("DELETE FROM connector_tools WHERE connector=?", (name,))
+        con.executemany("INSERT INTO connector_tools (connector, tool, description, mutates, source) VALUES (?, ?, ?, ?, ?)",
+                        [(name, t["tool"], t.get("description"), int(t["mutates"]), t["source"]) for t in tools])
+
+
+def connector_tools(name):
+    with connect() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM connector_tools WHERE connector=? ORDER BY tool", (name,))]
+
+
+def set_tool_mutates(name, tool, mutates):
+    with connect() as con:
+        con.execute("UPDATE connector_tools SET mutates=?, source='user' WHERE connector=? AND tool=?",
+                    (int(mutates), name, tool))
+
+
+def set_connector_roles(name, roles):
+    with connect() as con:
+        con.execute("DELETE FROM connector_roles WHERE connector=?", (name,))
+        con.executemany("INSERT INTO connector_roles (connector, role) VALUES (?, ?)", [(name, r) for r in roles])
+
+
+def connector_roles(name):
+    with connect() as con:
+        return [r["role"] for r in con.execute("SELECT role FROM connector_roles WHERE connector=? ORDER BY role", (name,))]
+
+
+def connectors_for_role(role):
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT c.* FROM connectors c JOIN connector_roles cr ON cr.connector=c.name WHERE cr.role=? ORDER BY c.name",
+            (role,))]
 
 
 if __name__ == "__main__":

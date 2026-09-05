@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { api, subscribe, fmtCost, fmtTime, leadOutput, codeRefPath, type ChainDetail, type Task, type Answer, type CodeRef, type Source, type Plan } from '../api'
+import { api, subscribe, fmtCost, fmtTime, leadOutput, codeRefPath, type ChainDetail, type Task, type Answer, type CodeRef, type Source, type Plan, type Turn } from '../api'
 
 type Impl = { status: string; summary: string; branch: string | null; commit_sha: string | null; files_changed: string[]; approach: string | null; verification: { commands_run: string[]; result: string; notes: string }; open_questions: string[]; blocked: { reason: string; conflict_detail: string; needs: string[] } | null }
 type Review = { verdict: string; findings: { file: string; line: number | null; severity: string; claim: string; evidence: string }[]; tests_run: { name: string; status: string; output_excerpt: string }[]; edge_cases_probed: string[] }
@@ -72,7 +72,8 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
         </>
       )}
 
-      <details style={{ marginTop: 18 }}><summary className="small">run details</summary>
+      <details style={{ marginTop: 18 }}><summary className="small">run details — {fmtCost(d.cost_usd)}</summary>
+        <TurnsTable turns={d.turns} />
         <div className="card" style={{ padding: 0, marginTop: 8 }}>
           <table><thead><tr><th>Model</th><th>Turns</th><th>Input+cache</th><th>Output</th><th>Cost</th><th>Duration</th></tr></thead>
             <tbody>{d.usage.map((u) => <tr key={u.id}><td className="mono small">{u.model}</td><td>{u.turns ?? '—'}</td><td className="mono">{(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens).toLocaleString()}</td><td className="mono">{u.output_tokens.toLocaleString()}</td><td className="mono">{fmtCost(u.cost_usd)}</td><td>{u.duration_ms ? `${Math.round(u.duration_ms / 1000)}s` : '—'}</td></tr>)}</tbody>
@@ -80,6 +81,26 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
         </div>
       </details>
     </>
+  )
+}
+
+function TurnsTable({ turns }: { turns: Turn[] }) {
+  if (!turns.length) return null
+  const est = turns.reduce((a, t) => a + t.est_cost_usd, 0)
+  return (
+    <details style={{ marginTop: 8 }}>
+      <summary className="small">{turns.length} turn{turns.length === 1 ? '' : 's'} · per-turn est≈${est.toFixed(4)} (list price; the run figure from the SDK is authoritative)</summary>
+      <table className="small" style={{ marginTop: 6 }}>
+        <thead><tr><th>#</th><th>Model</th><th>Tools called</th><th>In</th><th>Cache read</th><th>Cache write</th><th>Out</th><th>est</th></tr></thead>
+        <tbody>{turns.map((t) => (
+          <tr key={t.id}><td>{t.turn_index}</td><td className="mono">{t.model.replace('claude-', '')}</td>
+            <td className="mono">{t.tools.length ? t.tools.join(', ') : <span className="muted">{t.text_chars ? 'text' : '—'}</span>}</td>
+            <td className="mono">{t.input_tokens.toLocaleString()}</td><td className="mono">{t.cache_read_tokens.toLocaleString()}</td>
+            <td className="mono">{t.cache_write_tokens.toLocaleString()}</td><td className="mono">{t.output_tokens.toLocaleString()}</td>
+            <td className="mono">${t.est_cost_usd.toFixed(4)}</td></tr>
+        ))}</tbody>
+      </table>
+    </details>
   )
 }
 
@@ -182,6 +203,8 @@ function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: 
                 <span><span className={`pill ${t.status}`}>{t.status}</span> <span className="muted small">{fmtTime(t.finished_at ?? t.claimed_at ?? t.created_at)}</span></span>
               </div>
               <div style={{ marginTop: 8 }}><Structured task={t} /></div>
+              {(() => { const u = d.usage.filter((x) => x.task_id === t.id); const c = u.reduce((a, x) => a + x.cost_usd, 0); return u.length ? <div className="muted small" style={{ marginTop: 6 }}>run cost {fmtCost(c)} · {u.find((x) => x.turns)?.turns ?? '—'} turns · {Math.round((u[0]?.duration_ms ?? 0) / 1000)}s</div> : null })()}
+              <TurnsTable turns={d.turns.filter((x) => x.task_id === t.id)} />
               {t.status === 'failed' && t.result && <pre className="log small" style={{ marginTop: 8 }}>{t.result.slice(-1500)}</pre>}
               <details style={{ marginTop: 6 }}><summary className="small">task body</summary><pre className="log">{t.body}</pre></details>
             </div>

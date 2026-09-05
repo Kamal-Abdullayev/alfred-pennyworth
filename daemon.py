@@ -257,6 +257,7 @@ def handoff(role, task, res) -> str:
 
 
 def record_usage(task, role, res):
+    board.record_turns(task["id"], task["chain_id"], role, res.get("turn_log") or [])
     for model, u in (res.get("model_usage") or {}).items():
         board.record_usage(task["id"], task["chain_id"], role, model,
                            u["input_tokens"], u["output_tokens"], u["cache_read_tokens"],

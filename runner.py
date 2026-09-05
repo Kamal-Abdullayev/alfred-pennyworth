@@ -18,11 +18,13 @@ import yaml
 from dotenv import load_dotenv
 from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions,
-    AssistantMessage, TextBlock, ThinkingBlock, ResultMessage,
+    AssistantMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage,
     HookMatcher,
 )
 
+import connectors
 import contracts
+import pricing
 
 ROOT = Path(__file__).parent
 LOG_DIR = ROOT / "logs"
@@ -117,7 +119,8 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
                     meta: dict | None = None) -> dict:
     """Run one agent on one task. Returns a dict:
        text, structured (validated contract dict or None), contract, subtype,
-       is_error, turns, duration_ms, cost_usd, model_usage, denied (list of tools)
+       is_error, turns, duration_ms, cost_usd, model_usage, denied (list of tools),
+       turn_log (per-message tokens + est cost, see pricing.py)
     """
     # The API-key trap: if this env var is set, the SDK bills API rates
     # instead of the subscription. Refuse to run rather than silently pay.
@@ -180,6 +183,16 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
 
     mcp_mapping = {**os.environ, "PROJECT_ROOT": str(ROOT), "PYTHON": os.sys.executable}
     mcp_servers = _expand_env(cfg.get("mcp_servers", {}), mcp_mapping)
+
+    # Connectors configured in the UI and assigned to this role. Only their
+    # non-mutating, discovered tools become allow rules; everything else is denied.
+    db_servers, db_rules = connectors.role_servers(cfg["name"])
+    for name, server in db_servers.items():
+        if name in mcp_servers:
+            log_event(log, "connector_shadowed", {"connector": name, "by": "yaml mcp_servers"})
+            continue
+        mcp_servers[name] = server
+    allowed = allowed + [r for r in db_rules if r not in allowed]
 
     opt_kwargs = dict(
         model=cfg["model"],
@@ -246,13 +259,24 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
 
 async def _run(task, options, cfg, log, hlog, max_len) -> dict:
     out = {"text": "", "structured_raw": None, "subtype": None, "is_error": False,
-           "turns": 0, "duration_ms": 0, "cost_usd": 0.0, "model_usage": {}}
+           "turns": 0, "duration_ms": 0, "cost_usd": 0.0, "model_usage": {}, "turn_log": []}
     async with ClaudeSDKClient(options=options) as client:
         await client.query(task)
         # Don't return from inside this loop: bailing out early closes the
         # stream while hook callbacks may still be in flight.
         async for msg in client.receive_response():
             if isinstance(msg, AssistantMessage):
+                # Per-message accounting: exact tokens from the API, cost from pricing.py.
+                u = msg.usage or {}
+                tools = [b.name for b in msg.content if isinstance(b, ToolUseBlock)]
+                text_chars = sum(len(b.text) for b in msg.content if isinstance(b, TextBlock))
+                out["turn_log"].append({
+                    "turn_index": len(out["turn_log"]) + 1, "model": msg.model, "message_id": msg.message_id,
+                    "input_tokens": int(u.get("input_tokens") or 0), "output_tokens": int(u.get("output_tokens") or 0),
+                    "cache_read_tokens": int(u.get("cache_read_input_tokens") or 0),
+                    "cache_write_tokens": int(u.get("cache_creation_input_tokens") or 0),
+                    "est_cost_usd": pricing.estimate(msg.model, u), "tools": tools, "text_chars": text_chars,
+                })
                 for block in msg.content:
                     if isinstance(block, ThinkingBlock) and cfg["logging"].get("log_thinking") and block.thinking.strip():
                         log_event(log, "thinking", {"text": block.thinking[:max_len]})

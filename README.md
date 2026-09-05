@@ -15,6 +15,9 @@ runner.py         runs one agent on one task via the Agent SDK; enforces tool al
 daemon.py         role loop: claim -> run -> typed handoff
 worktree.py       one git worktree per chain; agents never touch your checked-out branch
 api.py            FastAPI + SSE over the board; serves the built UI at http://127.0.0.1:8787
+connectors.py     MCP connectors as data: templates, Keychain-backed config, live test + tool classification
+vault.py          macOS Keychain wrapper for connector secrets
+pricing.py        list-price table for per-turn cost estimates
 ui/               React (Vite) frontend: dashboard, chain timeline + diff + human review, usage, agents, connectors
 seed_task.py      drop a new job on the board (CLI alternative to the UI's Ask page)
 monitor.py        terminal board view
@@ -90,10 +93,29 @@ Crashed agent mid-task? Its claim expires after 15 minutes and the task reopens.
 `ALFRED_DB=/path/to/other.db` points the board (daemons and API) at a different
 SQLite file — useful for tests, or a second API instance on another port.
 
+## Connectors (UI → Connectors)
+
+MCP servers are configuration, not YAML edits. Add one from a template (Atlassian
+Cloud via mcp-remote, Confluence/Jira on-prem, GitLab, MySQL, custom stdio/HTTP) or
+**Import** a server already registered for Claude Desktop/Code. Secrets go to the
+macOS Keychain (`vault.py`, service `alfred-mcp`) — never to SQLite, YAML or logs.
+
+**Test** starts the server, lists its tools and classifies each as *read* or
+*mutates* (MCP `readOnlyHint` annotation when present, otherwise a name heuristic
+biased towards *mutates*; you can flip any tool, and your decision sticks). Tick the
+roles that may use the connector. On the next run the runner adds the server to that
+role's `mcp_servers` and allows **only its read tools**; mutating and undiscovered
+tools are denied by the PreToolUse gate. A connector with the same name as one in
+the role's YAML is shadowed by the YAML one.
+
 ## Cost
 
 `usage` rows are the SDK's estimate at API **list price** — on a Team seat that
-is a consumption meter against your rate-limit window, not a bill.
+is a consumption meter against your rate-limit window, not a bill. The SDK reports
+cost per run; `turns` adds per-message token counts (exact, from the API) with a
+list-price estimate from `pricing.py` — the only pricing arithmetic in Alfred — so a
+chain page shows which turn or tool call was expensive. The Usage page shows cost per
+request (chain), per day/role/model.
 
 ## Adding a role
 

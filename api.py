@@ -19,7 +19,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import board
+import connectors as conn
 import daemon
+import vault
 
 ROOT = Path(__file__).parent
 app = FastAPI(title="Alfred", version="0.1")
@@ -170,6 +172,7 @@ def chain(chain_id: str):
             "SELECT * FROM usage WHERE chain_id=? ORDER BY created_at", (chain_id,))]
     return {
         "root": _task(root), "tasks": [_task(t) for t in tasks_], "findings": findings, "usage": usage,
+        "turns": board.turns_for_chain(chain_id),
         "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_), "kind": _kind(root),
         "cost_usd": sum(u["cost_usd"] for u in usage),
     }
@@ -255,32 +258,159 @@ def usage_summary(days: int = 30):
         tot = dict(con.execute(
             "SELECT COALESCE(SUM(cost_usd),0) cost, COUNT(DISTINCT task_id) runs, COALESCE(SUM(input_tokens+cache_read_tokens+cache_write_tokens),0) in_tok, "
             "COALESCE(SUM(output_tokens),0) out_tok FROM usage WHERE created_at>=?", (since,)).fetchone())
-    return {"days": days, "by_day": by_day, "by_role": by_role, "by_model": by_model, "totals": tot,
+        by_chain = [dict(r) for r in con.execute(
+            "SELECT u.chain_id, t.title, SUM(u.cost_usd) cost, COUNT(DISTINCT u.task_id) runs, "
+            "SUM(u.input_tokens+u.cache_read_tokens+u.cache_write_tokens) in_tok, SUM(u.output_tokens) out_tok, MIN(u.created_at) started "
+            "FROM usage u JOIN tasks t ON t.id = u.chain_id WHERE u.created_at>=? GROUP BY u.chain_id ORDER BY started DESC LIMIT 100", (since,))]
+    return {"days": days, "by_day": by_day, "by_role": by_role, "by_model": by_model, "by_chain": by_chain, "totals": tot,
             "note": "cost_usd is the SDK's estimate at API list price — a consumption meter on a Team seat, not a bill"}
 
 
-@app.get("/api/connectors")
-def connectors():
-    """MCP servers the agents can reach (from agents/*.yaml) plus those registered for Claude
-    Desktop/Code. Names and commands only — never env values."""
-    out: dict[str, dict] = {}
-    for a in _agents():
-        cfg = yaml.safe_load(open(ROOT / a["path"]))
-        for name, s in (cfg.get("mcp_servers") or {}).items():
-            c = out.setdefault(name, {"name": name, "kind": s.get("type", "stdio"),
-                                      "command": _cmd(s), "used_by": [], "registered_in": ["agents/"]})
-            c["used_by"].append(a["role"])
+def _registered() -> list[dict]:
+    """Servers registered for Claude Desktop/Code — import candidates. Names and redacted commands only."""
+    out = []
     for label, path in (("claude-code", Path.home() / ".claude.json"),
                         ("claude-desktop", Path.home() / "Library/Application Support/Claude/claude_desktop_config.json")):
         try:
-            servers = json.loads(path.read_text()).get("mcpServers", {})
+            cfg = json.loads(path.read_text())
         except Exception:
             continue
+        servers = dict(cfg.get("mcpServers", {}))
+        for proj in (cfg.get("projects") or {}).values():
+            servers.update(proj.get("mcpServers") or {})
         for name, s in servers.items():
-            c = out.setdefault(name, {"name": name, "kind": s.get("type", "stdio"),
-                                      "command": _cmd(s), "used_by": [], "registered_in": []})
-            c["registered_in"].append(label)
-    return sorted(out.values(), key=lambda c: c["name"])
+            out.append({"name": name, "source": label, "kind": s.get("type") or ("stdio" if s.get("command") else "http"),
+                        "command": _cmd(s) if s.get("command") else (s.get("url") or "")})
+    return out
+
+
+def _connector_view(row: dict) -> dict:
+    env = json.loads(row.get("env") or "{}")
+    headers = json.loads(row.get("headers") or "{}")
+    tools = board.connector_tools(row["name"])
+    return {
+        **row, "args": json.loads(row.get("args") or "[]"),
+        "env": {k: {"secret": bool(v.get("secret")), "set": (vault.has_secret(row["name"], k) if v.get("secret") else bool(v.get("value"))),
+                    "value": None if v.get("secret") else v.get("value")} for k, v in env.items()},
+        "headers": {k: {"secret": bool(v.get("secret")), "set": (vault.has_secret(row["name"], f"header:{k}") if v.get("secret") else bool(v.get("value")))}
+                    for k, v in headers.items()},
+        "roles": board.connector_roles(row["name"]),
+        "tools": tools, "tool_count": len(tools), "mutating": sum(t["mutates"] for t in tools),
+        "yaml_used_by": [a["role"] for a in _agents() if row["name"] in a["mcp_servers"]],
+    }
+
+
+@app.get("/api/connectors")
+def connectors_list():
+    return {"connectors": [_connector_view(r) for r in board.list_connectors()],
+            "registered": _registered(),
+            "roles": list(daemon.configs()),
+            "yaml": [{"name": n, "used_by": [a["role"] for a in _agents() if n in a["mcp_servers"]]}
+                     for n in sorted({m for a in _agents() for m in a["mcp_servers"]})]}
+
+
+@app.get("/api/connectors/templates")
+def connector_templates():
+    return {k: {kk: vv for kk, vv in v.items()} for k, v in conn.TEMPLATES.items()}
+
+
+class ConnectorIn(BaseModel):
+    name: str
+    template: str | None = None
+    kind: str = "stdio"
+    command: str | None = None
+    args: list[str] = []
+    url: str | None = None
+    env: dict[str, dict] = {}       # {VAR: {"secret": bool, "value": str|None}}  value of a secret is stored, never returned
+    headers: dict[str, dict] = {}
+    note: str | None = None
+    enabled: bool = True
+
+
+@app.post("/api/connectors")
+def connector_save(c: ConnectorIn):
+    name = c.name.strip()
+    if not name or not re_name.match(name):
+        raise HTTPException(400, "name must be letters, digits, - or _")
+    env, headers = {}, {}
+    for var, spec in c.env.items():
+        if spec.get("secret"):
+            if spec.get("value"):
+                vault.set_secret(name, var, str(spec["value"]))
+            env[var] = {"secret": True}
+        else:
+            env[var] = {"secret": False, "value": spec.get("value")}
+    for h, spec in c.headers.items():
+        if spec.get("secret"):
+            if spec.get("value"):
+                vault.set_secret(name, f"header:{h}", str(spec["value"]))
+            headers[h] = {"secret": True}
+        else:
+            headers[h] = {"secret": False, "value": spec.get("value")}
+    board.upsert_connector({"name": name, "template": c.template, "kind": c.kind, "command": c.command,
+                            "args": json.dumps(c.args), "url": c.url, "env": json.dumps(env),
+                            "headers": json.dumps(headers), "note": c.note, "enabled": int(c.enabled)})
+    return _connector_view(board.get_connector(name))
+
+
+import re as _re
+re_name = _re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@app.post("/api/connectors/import")
+def connector_import(body: dict):
+    source, name = body.get("source"), body.get("name")
+    if source not in ("claude-code", "claude-desktop") or not name:
+        raise HTTPException(400, "source and name required")
+    try:
+        conn.import_from_config(source, name)
+    except KeyError:
+        raise HTTPException(404, f"{name} not registered in {source}")
+    return _connector_view(board.get_connector(name))
+
+
+@app.post("/api/connectors/{name}/test")
+async def connector_test(name: str):
+    if not board.get_connector(name):
+        raise HTTPException(404, f"no connector {name}")
+    result = await conn.test_connection(name)
+    return {**result, "connector": _connector_view(board.get_connector(name))}
+
+
+@app.put("/api/connectors/{name}/roles")
+def connector_roles(name: str, body: dict):
+    if not board.get_connector(name):
+        raise HTTPException(404, f"no connector {name}")
+    roles = [r for r in body.get("roles", []) if r in daemon.configs()]
+    board.set_connector_roles(name, roles)
+    return {"roles": roles}
+
+
+@app.put("/api/connectors/{name}/tools/{tool}")
+def connector_tool_mutates(name: str, tool: str, body: dict):
+    board.set_tool_mutates(name, tool, bool(body.get("mutates")))
+    return {"tool": tool, "mutates": bool(body.get("mutates")), "source": "user"}
+
+
+@app.put("/api/connectors/{name}/enabled")
+def connector_enabled(name: str, body: dict):
+    board.set_connector_enabled(name, bool(body.get("enabled")))
+    return {"enabled": bool(body.get("enabled"))}
+
+
+@app.delete("/api/connectors/{name}")
+def connector_delete(name: str):
+    row = board.get_connector(name)
+    if not row:
+        raise HTTPException(404, f"no connector {name}")
+    for var, spec in json.loads(row.get("env") or "{}").items():
+        if spec.get("secret"):
+            vault.delete_secret(name, var)
+    for h, spec in json.loads(row.get("headers") or "{}").items():
+        if spec.get("secret"):
+            vault.delete_secret(name, f"header:{h}")
+    board.delete_connector(name)
+    return {"deleted": name}
 
 
 @app.get("/api/events")

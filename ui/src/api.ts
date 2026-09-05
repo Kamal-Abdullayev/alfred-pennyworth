@@ -22,8 +22,13 @@ export type Usage = {
   input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number
   cost_usd: number; turns: number | null; duration_ms: number | null; created_at: number
 }
+export type Turn = {
+  id: number; task_id: string; chain_id: string; role: string; turn_index: number; model: string; message_id: string | null
+  input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number
+  est_cost_usd: number; tools: string[]; text_chars: number; created_at: number
+}
 export type ChainDetail = {
-  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]
+  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]
   diff: string | null; log: string | null; branch: string; status: string; kind: Kind; cost_usd: number
 }
 
@@ -60,10 +65,23 @@ export type UsageSummary = {
   by_day: { day: string; role: string; model: string; cost: number; in_tok: number; out_tok: number; runs: number }[]
   by_role: { role: string; cost: number; runs: number; in_tok: number; out_tok: number }[]
   by_model: { model: string; cost: number; runs: number }[]
+  by_chain: { chain_id: string; title: string; cost: number; runs: number; in_tok: number; out_tok: number; started: number }[]
   totals: { cost: number; runs: number; in_tok: number; out_tok: number }
   note: string
 }
-export type Connector = { name: string; kind: string; command: string; used_by: string[]; registered_in: string[] }
+export type FieldState = { secret: boolean; set: boolean; value?: string | null }
+export type ConnectorTool = { connector: string; tool: string; description: string | null; mutates: number; source: 'annotation' | 'heuristic' | 'user' }
+export type Connector = {
+  name: string; template: string | null; kind: 'stdio' | 'http' | 'sse'; command: string | null; args: string[]; url: string | null
+  env: Record<string, FieldState>; headers: Record<string, FieldState>; enabled: number; note: string | null
+  last_test_at: number | null; last_test_status: 'ok' | 'failed' | null; last_test_error: string | null
+  roles: string[]; tools: ConnectorTool[]; tool_count: number; mutating: number; yaml_used_by: string[]
+}
+export type Registered = { name: string; source: 'claude-code' | 'claude-desktop'; kind: string; command: string }
+export type ConnectorsResponse = { connectors: Connector[]; registered: Registered[]; roles: string[]; yaml: { name: string; used_by: string[] }[] }
+export type TemplateField = { secret: boolean; default: string | null; help: string }
+export type Template = { label: string; kind: 'stdio' | 'http' | 'sse'; command: string | null; args: string[]; url?: string; env: Record<string, TemplateField>; headers: Record<string, TemplateField>; note: string }
+export type ConnectorIn = { name: string; template: string | null; kind: string; command: string | null; args: string[]; url: string | null; env: Record<string, { secret: boolean; value: string | null }>; headers: Record<string, { secret: boolean; value: string | null }>; note: string | null; enabled: boolean }
 
 async function j<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, { headers: { 'content-type': 'application/json' }, ...init })
@@ -76,7 +94,15 @@ export const api = {
   chain: (id: string) => j<ChainDetail>(`/api/chains/${id}`),
   tasks: () => j<Task[]>('/api/tasks'),
   agents: () => j<Agent[]>('/api/agents'),
-  connectors: () => j<Connector[]>('/api/connectors'),
+  connectors: () => j<ConnectorsResponse>('/api/connectors'),
+  templates: () => j<Record<string, Template>>('/api/connectors/templates'),
+  saveConnector: (c: ConnectorIn) => j<Connector>('/api/connectors', { method: 'POST', body: JSON.stringify(c) }),
+  importConnector: (source: string, name: string) => j<Connector>('/api/connectors/import', { method: 'POST', body: JSON.stringify({ source, name }) }),
+  testConnector: (name: string) => j<{ ok: boolean; error: string | null; tools?: ConnectorTool[]; mutating?: number; connector: Connector }>(`/api/connectors/${name}/test`, { method: 'POST' }),
+  setConnectorRoles: (name: string, roles: string[]) => j<{ roles: string[] }>(`/api/connectors/${name}/roles`, { method: 'PUT', body: JSON.stringify({ roles }) }),
+  setToolMutates: (name: string, tool: string, mutates: boolean) => j<unknown>(`/api/connectors/${name}/tools/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify({ mutates }) }),
+  setConnectorEnabled: (name: string, enabled: boolean) => j<unknown>(`/api/connectors/${name}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
+  deleteConnector: (name: string) => j<unknown>(`/api/connectors/${name}`, { method: 'DELETE' }),
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
   createJob: (body: string, project_dir?: string) =>
     j<{ task_id: string; chain_id: string }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null }) }),
