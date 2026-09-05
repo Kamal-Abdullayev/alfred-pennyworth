@@ -427,3 +427,86 @@ def import_from_config(source: str, server_name: str) -> dict:
         log(server_name, "hint", "HTTP endpoint imported without any auth header. If it needs OAuth (e.g. mcp.atlassian.com), "
             "agents cannot log in; use the 'Atlassian Cloud (OAuth via mcp-remote)' template instead.", level="warn")
     return row
+
+
+# ------------------------------------------------------------ excalidraw ----
+
+async def excalidraw_call(tool: str, args: dict, timeout: float = 90.0):
+    """One call against the excalidraw connector (its own short-lived MCP session).
+    Returns the list of content blocks as plain dicts."""
+    row = board.get_connector("excalidraw")
+    if not row:
+        raise RuntimeError("no 'excalidraw' connector on the board")
+    from mcp import ClientSession, StdioServerParameters
+    from mcp.client.stdio import stdio_client
+    cfg = server_config(row)
+    params = StdioServerParameters(command=cfg["command"], args=cfg.get("args", []), env={**os.environ, **cfg.get("env", {})})
+    async with stdio_client(params) as (r, w):
+        async with ClientSession(r, w) as s:
+            await asyncio.wait_for(s.initialize(), timeout)
+            res = await asyncio.wait_for(s.call_tool(tool, args), timeout)
+            out = []
+            for c in res.content:
+                d = {"type": c.type}
+                if c.type == "text":
+                    d["text"] = c.text
+                elif c.type == "image":
+                    d["data"], d["mimeType"] = c.data, c.mimeType
+                out.append(d)
+            return out
+
+
+async def excalidraw_snapshot_async(task_id: str) -> list[dict]:
+    """Save what is on the canvas right now as assets of a run: the scene JSON always,
+    a PNG when a browser has the canvas open (the UI's embedded canvas counts).
+    Async because the runner calls it from inside its own event loop."""
+    import base64
+    out_dir = ROOT / "data" / "assets" / str(task_id)
+    saved = []
+    try:
+        blocks = await excalidraw_call("export_scene", {})
+    except Exception as e:  # noqa: BLE001
+        log("excalidraw", "snapshot_failed", f"export_scene failed for run {task_id}: {type(e).__name__}: {str(e)[:200]}", level="warn")
+        return saved
+    for b in blocks:
+        txt = b.get("text") or ""
+        if b.get("type") == "text" and '"elements"' in txt[:400]:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            n = len([p for p in out_dir.iterdir() if p.suffix == ".excalidraw"]) + 1
+            path = out_dir / f"scene-{n}.excalidraw"
+            path.write_text(txt, encoding="utf-8")
+            saved.append({"kind": "scene", "path": str(path)})
+    try:
+        blocks = await excalidraw_call("export_to_image", {"format": "png"})
+        for b in blocks:
+            if b.get("type") == "image" and b.get("data"):
+                out_dir.mkdir(parents=True, exist_ok=True)
+                n = len([p for p in out_dir.iterdir() if p.suffix == ".png"]) + 1
+                path = out_dir / f"canvas-{n}.png"
+                path.write_bytes(base64.b64decode(b["data"]))
+                saved.append({"kind": "image", "path": str(path)})
+    except Exception:
+        pass   # needs a browser on the canvas; the scene JSON is the durable copy
+    log("excalidraw", "snapshot", f"run {task_id}: saved {[s_['kind'] for s_ in saved]}", {"files": [s_["path"] for s_ in saved]})
+    return saved
+
+
+def excalidraw_snapshot(task_id: str) -> list[dict]:
+    """Sync wrapper for callers without a running loop (API endpoints, scripts)."""
+    return asyncio.run(excalidraw_snapshot_async(task_id))
+
+
+def excalidraw_show(task_id: str, name: str) -> str:
+    """Put a saved scene back on the canvas (clears it first)."""
+    path = (ROOT / "data" / "assets" / task_id / name).resolve()
+    if (ROOT / "data" / "assets").resolve() not in path.parents or not path.is_file():
+        raise FileNotFoundError(name)
+    scene = path.read_text(encoding="utf-8")
+    blocks = asyncio.run(excalidraw_call("import_scene", {"data": scene, "mode": "replace"}))
+    try:
+        asyncio.run(excalidraw_call("set_viewport", {"scrollToContent": True}))
+    except Exception:
+        pass
+    msg = " ".join((b.get("text") or "") for b in blocks)[:300]
+    log("excalidraw", "show", f"restored {name} from run {task_id}: {msg}")
+    return msg

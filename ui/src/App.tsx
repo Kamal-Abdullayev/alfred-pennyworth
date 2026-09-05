@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react'
 import { NavLink, Route, Routes } from 'react-router-dom'
 import Dashboard from './pages/Dashboard'
 import Ask from './pages/Ask'
@@ -7,9 +8,28 @@ import UsagePage from './pages/Usage'
 import Connectors from './pages/Connectors'
 import Logs from './pages/Logs'
 
+/** The bundle is rebuilt often; when the server's UI version changes, offer a reload instead of
+ *  letting the tab keep running stale code. */
+function useNewVersion() {
+  const [stale, setStale] = useState(false)
+  useEffect(() => {
+    let first: string | null = null
+    const check = () => fetch('/api/health').then((r) => r.json()).then((h: { ui_version?: string }) => {
+      if (!h.ui_version) return
+      if (first === null) first = h.ui_version
+      else if (h.ui_version !== first) setStale(true)
+    }).catch(() => {})
+    check(); const t = setInterval(check, 20000)
+    return () => clearInterval(t)
+  }, [])
+  return stale
+}
+
 export default function App() {
+  const stale = useNewVersion()
   return (
     <div className="layout">
+      {stale && <div className="stale-banner">A newer version of Alfred's UI is available — <button className="btn-link" onClick={() => location.reload()}>reload</button></div>}
       <nav>
         <div className="brand">Alfred</div>
         <NavLink to="/" end>Dashboard</NavLink>

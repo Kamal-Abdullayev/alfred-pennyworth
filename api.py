@@ -53,6 +53,8 @@ def _chain_status(tasks: list[dict]) -> str:
     if _kind(root) == "answer" and root["status"] == "done":
         return "answered"
     statuses = {t["status"] for t in tasks}
+    if root["status"] == "cancelled" or ("cancelled" in statuses and not (statuses & {"open", "claimed", "stuck", "done"})):
+        return "cancelled"
     if board.chain_is_closed(root["chain_id"]) or ("closed" in statuses and not (statuses & {"open", "claimed", "stuck"})):
         return "closed"
     if "stuck" in statuses:
@@ -143,9 +145,15 @@ def _cmd(server: dict) -> str:
 
 # ------------------------------------------------------------------ routes ----
 
+def _ui_version() -> str:
+    """Changes whenever the UI is rebuilt — the page polls it and offers a reload."""
+    idx = ROOT / "ui" / "dist" / "index.html"
+    return str(int(idx.stat().st_mtime)) if idx.is_file() else "dev"
+
+
 @app.get("/api/health")
 def health():
-    return {"ok": True, "db": str(board.DB_PATH), "roles": list(daemon.configs())}
+    return {"ok": True, "db": str(board.DB_PATH), "roles": list(daemon.configs()), "ui_version": _ui_version()}
 
 
 BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite"]
@@ -396,7 +404,9 @@ def conversation(cid: str):
         root = _task(t)
         turns.append({"chain_id": t["chain_id"], "question": t.get("question") or t["body"], "status": t["status"],
                       "kind": _kind(root), "created_at": t["created_at"], "finished_at": t["finished_at"],
-                      "cost_usd": costs.get(t["chain_id"], 0.0), "structured": root["structured"], "result": t.get("result")})
+                      "cost_usd": costs.get(t["chain_id"], 0.0), "structured": root["structured"], "result": t.get("result"),
+                      # the runner snapshots the canvas whenever the agent used excalidraw tools
+                      "drew": any(a["name"].endswith(".excalidraw") for a in _task_assets(t["id"]))})
     return {**c, "turns": turns}
 
 
@@ -459,6 +469,26 @@ def chain_action(chain_id: str, a: ChainActionIn):
         daemon.flow(f"[human] DISPATCHED plan for chain {chain_id} into {p.resolve()} — {outcome}")
         return {"dispatched": True, "outcome": outcome}
     raise HTTPException(400, f"unknown action {a.action}")
+
+
+@app.post("/api/tasks/{task_id}/stop")
+def task_stop(task_id: str):
+    """Stop one task: queued → cancelled now; running → the agent is interrupted within seconds."""
+    r = board.request_stop(task_id)
+    if r is None:
+        raise HTTPException(404, f"no task {task_id}")
+    daemon.flow(f"[human] STOP requested for {task_id} ({r})")
+    return {"task_id": task_id, "result": r}
+
+
+@app.post("/api/chains/{chain_id}/stop")
+def chain_stop(chain_id: str):
+    """Stop everything in a chain and close it."""
+    if not board.chain_root(chain_id):
+        raise HTTPException(404, f"no chain {chain_id}")
+    outcome = board.stop_chain(chain_id)
+    daemon.flow(f"[human] STOP chain {chain_id}: {outcome}")
+    return {"chain_id": chain_id, "tasks": outcome}
 
 
 class FindingIn(BaseModel):
@@ -710,6 +740,36 @@ def asset_file(task_id: str, name: str):
         raise HTTPException(404, "no such asset")
     media = {".png": "image/png", ".svg": "image/svg+xml", ".excalidraw": "application/json"}.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(p, media_type=media)
+
+
+@app.get("/api/canvas")
+def canvas_info():
+    return {"url": board.get_setting("excalidraw_canvas_url", "http://localhost:3000"),
+            "configured": board.get_connector("excalidraw") is not None}
+
+
+@app.post("/api/canvas/show")
+def canvas_show(body: dict):
+    """Put a saved scene (an asset of a run) back on the shared Excalidraw canvas."""
+    task_id, name = str(body.get("task_id", "")), str(body.get("name", ""))
+    try:
+        msg = conn.excalidraw_show(task_id, name)
+    except FileNotFoundError:
+        raise HTTPException(404, "no such scene")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, conn.mask(f"{type(e).__name__}: {e}"))
+    return {"ok": True, "message": msg}
+
+
+@app.post("/api/canvas/clear")
+def canvas_clear():
+    try:
+        import asyncio as _a
+        _a.run(conn.excalidraw_call("clear_canvas", {}))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, conn.mask(f"{type(e).__name__}: {e}"))
+    conn.log("excalidraw", "cleared", "canvas cleared from the UI")
+    return {"ok": True}
 
 
 @app.put("/api/connectors/{name}/enabled")
@@ -1007,4 +1067,6 @@ if _dist.is_dir():
         candidate = _dist / path
         if path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(_dist / "index.html")
+        # index.html must never be cached: it names the hashed bundle, and a cached copy keeps
+        # a tab on stale code after every rebuild. The hashed assets themselves may be cached.
+        return FileResponse(_dist / "index.html", headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"})

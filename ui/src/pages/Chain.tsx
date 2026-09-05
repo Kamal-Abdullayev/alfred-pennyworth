@@ -112,6 +112,17 @@ function HumanActions({ d, id, reload }: { d: ChainDetail; id: string; reload: (
   const [busy, setBusy] = useState(false)
   const stuckCount = d.tasks.filter((t) => t.status === 'stuck').length
   const notDispatched = d.status === 'not_dispatched'
+  if (d.status === 'running') {
+    return (
+      <div className="card" style={{ display: 'flex', gap: 10, alignItems: 'center' }}>
+        <span className="pill running">running</span>
+        <span className="small muted">{d.tasks.filter((t) => t.status === 'claimed').length} agent(s) working, {d.tasks.filter((t) => t.status === 'open').length} queued</span>
+        <button className="btn-link" style={{ borderColor: 'var(--bad)', color: 'var(--bad)', marginLeft: 'auto' }} disabled={busy}
+          onClick={async () => { setBusy(true); try { const r = await api.stopChain(id); setMsg(`stopped: ${JSON.stringify(r.tasks)}`); reload() } catch (e) { setMsg(String(e)) } finally { setBusy(false) } }}>■ stop this chain</button>
+        {msg && <span className="small muted">{msg}</span>}
+      </div>
+    )
+  }
   if (!['stuck', 'failed', 'not_dispatched'].includes(d.status)) return null
   async function act(body: { action: 'requeue' | 'close' | 'dispatch'; reason?: string; project_dir?: string }) {
     setBusy(true); setMsg(null)

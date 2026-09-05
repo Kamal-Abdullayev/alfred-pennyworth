@@ -75,29 +75,38 @@ function Steps({ steps, live }: { steps: Step[]; live: boolean }) {
   )
 }
 
-function LiveCanvas({ url }: { url: string }) {
+/** Keeps the Excalidraw frontend connected (invisibly) while the Ask page is open, so the
+ *  lead's Mermaid→canvas conversion and image exports work. No UI of its own. */
+function CanvasConnection({ url, configured }: { url: string; configured: boolean }) {
+  if (!configured) return null
+  return <iframe src={url} title="Excalidraw connection" aria-hidden style={{ position: 'fixed', width: 1, height: 1, opacity: 0, pointerEvents: 'none', bottom: 0, right: 0, border: 0 }} />
+}
+
+/** Shown under a turn only when that turn drew on the canvas. */
+function TurnCanvas({ url }: { url: string }) {
   const [open, setOpen] = useState(false)
   return (
-    <div style={{ marginTop: 10 }}>
-      <div className="actions" style={{ alignItems: 'center' }}>
-        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'hide' : 'show'} live canvas</button>
-        <a className="btn-link" href={url} target="_blank" rel="noreferrer">open canvas in a tab</a>
-        <span className="muted small">the lead drew on the shared Excalidraw canvas — edit it here; exports work while this is open</span>
-      </div>
-      {open && <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: 560, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, background: '#fff' }} />}
+    <div style={{ marginTop: 8 }}>
+      <span className="actions" style={{ alignItems: 'center' }}>
+        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'hide live canvas' : 'show live canvas'}</button>
+        <a className="btn-link" href={url} target="_blank" rel="noreferrer">open in a tab</a>
+        <span className="muted small">the lead drew on the shared canvas</span>
+      </span>
+      {open && <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: 600, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, background: '#fff', display: 'block' }} />}
     </div>
   )
 }
 
-function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void }) {
+function AssistantTurn({ turn, live, onNeedEvents, canvasUrl, onStop }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void; canvasUrl: string; onStop: () => Promise<void> }) {
+  const [stopping, setStopping] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = toSteps(live.events)
-  const finished = ['done', 'failed', 'stuck'].includes(turn.status) || !!live.detail
+  const finished = ['done', 'failed', 'stuck', 'cancelled', 'closed'].includes(turn.status) || !!live.detail
   const running = !finished && !live.error
   const lead = leadOutput(live.detail?.root.structured ?? turn.structured)
   const links = live.detail?.code_links ?? []
   const last = steps[steps.length - 1]
-  const drew = live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
+  const drew = !!turn.drew || live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
   const headline = running
     ? (live.status === 'open' || turn.status === 'open' ? 'waiting for the team lead to pick this up…' : 'team lead is working…')
     : `${lead?.kind === 'answer' ? 'answered' : turn.status} · ${live.eventsLoaded ? `${steps.length} steps` : 'show what it did'}`
@@ -109,11 +118,14 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
         <span>{headline}</span>
         {running && last && !showSteps && <span className="mono muted" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 520 }}>· {last.lab} {last.txt}</span>}
         <span className="muted">{showSteps ? '▾' : '▸'}</span>
+        {running && <button className="btn-link" style={{ marginLeft: 'auto', borderColor: 'var(--bad)', color: 'var(--bad)' }} disabled={stopping}
+          onClick={async (e) => { e.stopPropagation(); setStopping(true); try { await onStop() } finally { setStopping(false) } }}>{stopping ? 'stopping…' : '■ stop'}</button>}
       </div>
+      {drew && <TurnCanvas url={canvasUrl} />}
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
-      {drew && <LiveCanvas url={live.detail?.canvas_url ?? 'http://localhost:3000'} />}
+
       {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
           {dispatched
@@ -123,7 +135,8 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
           {dispatched && <div className="small">Follow the developers and QA on the <a href={`/chains/${turn.chain_id}`}>chain page</a>.</div>}
         </div>
       ) })()}
-      {finished && !lead && turn.status !== 'done' && <div className="err small">The run ended with status <b>{turn.status}</b>{turn.result ? `: ${turn.result.slice(0, 400)}` : ''}</div>}
+      {finished && turn.status === 'cancelled' && <div className="small" style={{ color: 'var(--warn)', marginTop: 6 }}>■ stopped by you{turn.result?.includes('before start') ? ' before it started' : ''} — cost so far {fmtCost(live.detail?.cost_usd ?? turn.cost_usd)}</div>}
+      {finished && !lead && !['done', 'cancelled'].includes(turn.status) && <div className="err small">The run ended with status <b>{turn.status}</b>{turn.result ? `: ${turn.result.slice(0, 400)}` : ''}</div>}
       {finished && <div className="meta">{fmtCost(live.detail?.cost_usd ?? turn.cost_usd)} · <a href={`/chains/${turn.chain_id}`}>full chain, transcript and per-turn cost</a></div>}
     </div>
   )
@@ -140,6 +153,7 @@ export default function Ask() {
   const [project, setProject] = useState(() => { try { return localStorage.getItem(PROJECT_KEY) ?? '' } catch { return '' } })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [canvas, setCanvas] = useState<{ url: string; configured: boolean }>({ url: 'http://localhost:3000', configured: false })
   const closers = useRef<Record<string, () => void>>({})
   const bottom = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -166,7 +180,7 @@ export default function Ask() {
     window.addEventListener('scroll', onScroll, { passive: true })
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
-  useEffect(() => { loadConvs() }, [])
+  useEffect(() => { loadConvs(); api.canvas().then(setCanvas).catch(() => {}) }, [])
   useEffect(() => {
     Object.values(closers.current).forEach((c) => c()); closers.current = {}
     setLives({}); setTurns([]); setTitle('')
@@ -228,12 +242,14 @@ export default function Ask() {
           {cid && <span className="actions"><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
         </div>
         {err && <p className="err">{err}</p>}
+        <CanvasConnection url={canvas.url} configured={canvas.configured} />
         <div className="chat">
           {!cid && <div className="card muted small">Ask the team lead anything about your systems — a ticket, a merge request, how something works, why a pipeline is red. You'll see what it reads and runs while it works, then the answer with the code it relied on. Give a repository path below if the question is about local code; otherwise it reads through GitLab. Follow-ups in the same conversation carry the earlier answers as context.</div>}
           {turns.map((t) => (
             <div key={t.chain_id} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="bubble user">{t.question}<div className="meta">{new Date(t.created_at * 1000).toLocaleString()} · <a href={`/chains/${t.chain_id}`} className="mono">{t.chain_id}</a></div></div>
-              <AssistantTurn turn={t} live={lives[t.chain_id] ?? empty()} onNeedEvents={() => loadEvents(t.chain_id)} />
+              <AssistantTurn turn={t} live={lives[t.chain_id] ?? empty()} onNeedEvents={() => loadEvents(t.chain_id)} canvasUrl={canvas.url}
+                onStop={async () => { await api.stopTask(t.chain_id); setTurns((ts) => ts.map((x) => x.chain_id === t.chain_id && x.status === 'open' ? { ...x, status: 'cancelled', result: 'cancelled before start' } : x)) }} />
             </div>
           ))}
           <div ref={bottom} />
