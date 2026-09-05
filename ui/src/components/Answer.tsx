@@ -1,8 +1,8 @@
 import type React from 'react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Answer, CodeRef, CodeLink, Plan } from '../api'
+import type { Answer, Asset, CodeRef, CodeLink, Plan } from '../api'
 
 const mdComponents = {
   // a wide table scrolls inside its own box instead of squeezing columns until words break
@@ -42,9 +42,48 @@ export function CodeBlock({ code: r, link }: { code: CodeRef; link: CodeLink | u
   )
 }
 
+let mermaidReady: Promise<typeof import('mermaid')> | null = null
+function loadMermaid() {
+  if (!mermaidReady) mermaidReady = import('mermaid').then((m) => { m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict', fontFamily: 'inherit' }); return m })
+  return mermaidReady
+}
+
+export function Mermaid({ code, title }: { code: string; title?: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [err, setErr] = useState<string | null>(null)
+  useEffect(() => {
+    let alive = true
+    loadMermaid().then(async (m) => {
+      try {
+        const { svg } = await m.default.render(`mm-${Math.random().toString(36).slice(2)}`, code)
+        if (alive && ref.current) { ref.current.innerHTML = svg; setErr(null) }
+      } catch (e) { if (alive) setErr(String(e)) }
+    })
+    return () => { alive = false }
+  }, [code])
+  return (
+    <div className="diagram">
+      {title && <div className="small" style={{ marginBottom: 4 }}><b>{title}</b></div>}
+      {err ? <pre className="log small">{code}\n\n{err}</pre> : <div ref={ref} className="mermaid-host" />}
+    </div>
+  )
+}
+
+export function Assets({ assets }: { assets: Asset[] }) {
+  if (!assets.length) return null
+  return (
+    <div style={{ marginTop: 10 }}>
+      {assets.map((a) => a.kind === 'image'
+        ? <div key={a.url} className="diagram"><img src={a.url} alt={a.name} style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /><div className="muted small">{a.name}</div></div>
+        : <a key={a.url} className="btn-link" href={a.url} download={a.name} style={{ marginRight: 8 }}>download {a.name} ({(a.bytes / 1024).toFixed(0)} kB)</a>)}
+    </div>
+  )
+}
+
 /** The body of an answer: text, code, sources. Used by the chat and by the chain page. */
-export function AnswerContent({ a, links, compact }: { a: Answer; links: CodeLink[]; compact?: boolean }) {
+export function AnswerContent({ a, links, compact, assets = [] }: { a: Answer; links: CodeLink[]; compact?: boolean; assets?: Asset[] }) {
   const src = a.source
+  const diagrams = a.diagrams ?? []
   return (
     <>
       <div className="small muted" style={{ marginBottom: 8 }}>
@@ -53,6 +92,13 @@ export function AnswerContent({ a, links, compact }: { a: Answer; links: CodeLin
         {src.branch ? <span className="mono"> · {src.branch}</span> : ''}{src.commit ? <span className="mono"> @ {src.commit.slice(0, 8)}</span> : ''}
       </div>
       <Markdown text={a.answer} />
+      {diagrams.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          {!compact && <h2>Diagrams ({diagrams.length})</h2>}
+          {diagrams.map((d, i) => <div key={i}><Mermaid code={d.mermaid} title={d.title} /><div className="muted small" style={{ marginBottom: 10 }}>{d.description}</div></div>)}
+        </div>
+      )}
+      <Assets assets={assets} />
       {a.code.length > 0 && (
         <div style={{ marginTop: 12 }}>
           {!compact && <h2>Code ({a.code.length})</h2>}

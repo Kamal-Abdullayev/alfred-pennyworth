@@ -95,9 +95,16 @@ class Source(BaseModel):
     commit: str | None = Field(description="Commit sha that was read, when known")
 
 
+class Diagram(BaseModel):
+    title: str
+    description: str = Field(description="One sentence: what the diagram shows and why it helps")
+    mermaid: str = Field(description="Mermaid source (flowchart, sequenceDiagram, classDiagram, stateDiagram, erDiagram). Rendered in the UI.")
+
+
 class Answer(BaseModel):
     answer: str = Field(description="Markdown. Lead with the direct answer in one or two sentences, then detail. Tables for enumerations. Caveats last under their own heading.")
     code: list[CodeRef] = Field(description="Code the reader should see, in the order it is referenced. Empty if the answer is not about code.")
+    diagrams: list[Diagram] = Field(description="Diagrams that make the answer clearer — flows, sequences, architecture, state machines. Empty when a picture adds nothing.")
     source: Source
     citations: list[Citation]
     confidence: Literal["low", "medium", "high"]

@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS connectors (
     env              TEXT,               -- JSON {VAR: {"secret": bool, "value": str}}
     headers          TEXT,               -- JSON {Header: {"secret": bool, "value": str}}
     enabled          INTEGER NOT NULL DEFAULT 1,
+    trust_writes     INTEGER NOT NULL DEFAULT 0,  -- 1 = its mutating tools are harmless (scratch canvas) and allowed
     note             TEXT,
     last_test_at     REAL,
     last_test_status TEXT,               -- ok | failed
@@ -205,6 +206,9 @@ def init():
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # the spec-approval gate is gone; anything left waiting becomes claimable
         con.execute("UPDATE tasks SET status='open' WHERE status='awaiting_approval'")
+        ccols = [r["name"] for r in con.execute("PRAGMA table_info(connectors)")]
+        if ccols and "trust_writes" not in ccols:
+            con.execute("ALTER TABLE connectors ADD COLUMN trust_writes INTEGER NOT NULL DEFAULT 0")
 
 
 # ---------------------------------------------------------------- tasks ----
@@ -578,6 +582,11 @@ def delete_connector(name):
         con.execute("DELETE FROM connector_roles WHERE connector=?", (name,))
         con.execute("DELETE FROM connector_log WHERE connector=?", (name,))
         con.execute("DELETE FROM connectors WHERE name=?", (name,))
+
+
+def set_connector_trust_writes(name, trust):
+    with connect() as con:
+        con.execute("UPDATE connectors SET trust_writes=?, updated_at=? WHERE name=?", (int(trust), time.time(), name))
 
 
 def set_connector_enabled(name, enabled):

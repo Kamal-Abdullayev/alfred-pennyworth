@@ -26,7 +26,7 @@ function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
       <div className="card"><pre style={{ margin: 0, whiteSpace: 'pre-wrap', font: 'inherit' }}>{root.body}</pre></div>
 
       <h2>Answer</h2>
-      <div className="card"><AnswerContent a={a} links={d.code_links} /></div>
+      <div className="card"><AnswerContent a={a} links={d.code_links} assets={d.assets} /></div>
 
       <details style={{ marginTop: 18 }}><summary className="small">run details — {fmtCost(d.cost_usd)}</summary>
         <TurnsTable turns={d.turns} />

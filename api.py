@@ -315,6 +315,8 @@ def chain(chain_id: str):
         "root": _task(root), "tasks": [_task(t) for t in tasks_], "findings": findings, "usage": usage,
         "turns": board.turns_for_chain(chain_id),
         "code_links": (_code_links((_task(root)["structured"] or {}).get("answer") or {}) if _kind(root) == "answer" else []),
+        "assets": [a for t in tasks_ for a in _task_assets(t["id"])],
+        "canvas_url": board.get_setting("excalidraw_canvas_url", "http://localhost:3000"),
         "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_), "kind": _kind(root),
         "cost_usd": sum(u["cost_usd"] for u in usage),
     }
@@ -671,6 +673,43 @@ def connector_tool_mutates(name: str, tool: str, body: dict):
     board.set_tool_mutates(name, tool, bool(body.get("mutates")))
     conn.log(name, "tool_access", f"{tool} set to {'mutates (denied)' if body.get('mutates') else 'read (allowed)'} by user")
     return {"tool": tool, "mutates": bool(body.get("mutates")), "source": "user"}
+
+
+@app.put("/api/connectors/{name}/trust_writes")
+def connector_trust_writes(name: str, body: dict):
+    if not board.get_connector(name):
+        raise HTTPException(404, f"no connector {name}")
+    trust = bool(body.get("trust_writes"))
+    board.set_connector_trust_writes(name, trust)
+    conn.log(name, "trust_writes", "writes marked SAFE — all tools allowed to assigned roles (scratch tool, not a system of record)"
+             if trust else "writes marked unsafe — only read tools allowed", level="warn" if trust else "info")
+    return {"trust_writes": trust}
+
+
+# --------------------------------------------------------------- assets ----
+
+ASSETS = ROOT / "data" / "assets"
+
+
+def _task_assets(task_id: str) -> list[dict]:
+    d = ASSETS / task_id
+    if not d.is_dir():
+        return []
+    out = []
+    for p in sorted(d.iterdir()):
+        if p.is_file():
+            kind = "image" if p.suffix.lower() in (".png", ".svg") else "scene" if p.suffix == ".excalidraw" else "file"
+            out.append({"task_id": task_id, "name": p.name, "kind": kind, "bytes": p.stat().st_size, "url": f"/api/assets/{task_id}/{p.name}"})
+    return out
+
+
+@app.get("/api/assets/{task_id}/{name}")
+def asset_file(task_id: str, name: str):
+    p = (ASSETS / task_id / name).resolve()
+    if ASSETS.resolve() not in p.parents or not p.is_file():
+        raise HTTPException(404, "no such asset")
+    media = {".png": "image/png", ".svg": "image/svg+xml", ".excalidraw": "application/json"}.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(p, media_type=media)
 
 
 @app.put("/api/connectors/{name}/enabled")

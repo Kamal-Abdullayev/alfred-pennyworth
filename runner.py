@@ -202,7 +202,33 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
             log_event(log, "hook_error", {"where": "pre_tool", "error": repr(e)})
         return {}
 
+    def _capture_asset(tool, response):
+        """Excalidraw exports become files of the run: scene JSON, PNG/SVG images."""
+        if not tool.startswith("mcp__excalidraw__") or not meta.get("id"):
+            return
+        blocks = response if isinstance(response, list) else [response]
+        out_dir = ROOT / "data" / "assets" / str(meta["id"])
+        for b in blocks:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "image" and b.get("data"):
+                import base64
+                ext = ".svg" if "svg" in str(b.get("mimeType", "")) else ".png"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / f"canvas-{len(list(out_dir.iterdir())) + 1}{ext}"
+                path.write_bytes(base64.b64decode(b["data"]))
+                log_event(log, "asset", {"tool": tool, "kind": "image", "path": str(path)})
+            elif tool.endswith("export_scene") and b.get("type") == "text" and '"elements"' in str(b.get("text", ""))[:200]:
+                out_dir.mkdir(parents=True, exist_ok=True)
+                path = out_dir / f"scene-{len(list(out_dir.iterdir())) + 1}.excalidraw"
+                path.write_text(b["text"], encoding="utf-8")
+                log_event(log, "asset", {"tool": tool, "kind": "scene", "path": str(path)})
+
     async def post_tool(input_data, tool_use_id, context):
+        try:
+            _capture_asset(input_data.get("tool_name", ""), input_data.get("tool_response"))
+        except Exception as e:
+            log_event(log, "hook_error", {"where": "capture_asset", "error": repr(e)})
         try:
             if cfg["logging"].get("log_tool_io", True):
                 out = str(input_data.get("tool_response"))
