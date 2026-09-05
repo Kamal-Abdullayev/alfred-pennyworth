@@ -51,11 +51,12 @@ export default function Dashboard() {
       <h2>Chains</h2>
       <div className="card" style={{ padding: 0 }}>
         <table>
-          <thead><tr><th>Status</th><th>Job</th><th>Roles</th><th>Round</th><th>Cost</th><th>Updated</th></tr></thead>
+          <thead><tr><th>Status</th><th>Kind</th><th>Job</th><th>Roles</th><th>Round</th><th>Cost</th><th>Updated</th></tr></thead>
           <tbody>
             {chains.map((c) => (
               <tr key={c.chain_id} className="row" onClick={() => nav(`/chains/${c.chain_id}`)}>
                 <td><span className={`pill ${c.status}`}>{c.status}</span></td>
+                <td><span className={`pill ${c.kind}`}>{c.kind}</span></td>
                 <td>{c.title}<div className="muted small mono">{c.chain_id}{c.project_dir ? ` · ${c.project_dir.split('/').slice(-2).join('/')}` : ''}</div></td>
                 <td>{Object.entries(c.roles).map(([r, n]) => <span key={r} className={`pill ${r}`} style={{ marginRight: 4 }}>{r} {n}</span>)}</td>
                 <td>{c.iteration}</td>
@@ -63,7 +64,7 @@ export default function Dashboard() {
                 <td className="muted">{ago(c.updated_at)}</td>
               </tr>
             ))}
-            {chains.length === 0 && <tr><td colSpan={6} className="muted">No chains yet — give the team lead a job in <a href="/ask">Ask</a>.</td></tr>}
+            {chains.length === 0 && <tr><td colSpan={7} className="muted">No chains yet — give the team lead a job in <a href="/ask">Ask</a>.</td></tr>}
           </tbody>
         </table>
       </div>

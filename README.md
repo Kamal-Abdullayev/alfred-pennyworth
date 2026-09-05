@@ -60,8 +60,15 @@ the job. The team lead daemon picks it up on its next poll.
 
 ## Flow
 
-1. **team_lead** investigates (local Read, GitLab tools) and produces a
-   structured **plan**: subtasks with acceptance criteria. If the project is a git
+0. **team_lead** reads the request and decides what it is. A **question** ("what
+   options do we have", "why is X failing") gets `kind: answer` — the lead answers
+   it directly, with the code it relied on as verbatim snippets (path + line range),
+   the exact checkout it read (`source`: repo, branch, commit — injected by the
+   daemon, never guessed), and citations. The chain is complete; no developer runs.
+   The UI renders the answer as Markdown with code blocks and **Open in IntelliJ**
+   links (`idea://open?file=…&line=…`, needs IntelliJ installed).
+1. **Work** gets `kind: plan`: **team_lead** investigates (local Read, GitLab tools)
+   and produces subtasks with acceptance criteria. If the project is a git
    repo, a worktree is created at `worktrees/<chain>` on branch `alfred/<chain>`.
    One **developer** task is created per subtask.
 2. **developer** implements in the worktree, runs tests, commits, and reports
@@ -79,6 +86,9 @@ Tools outside a role's `allowed_tools` are denied in a hook, and agents run with
 `setting_sources=[]` so nothing from `~/.claude` leaks in.
 
 Crashed agent mid-task? Its claim expires after 15 minutes and the task reopens.
+
+`ALFRED_DB=/path/to/other.db` points the board (daemons and API) at a different
+SQLite file — useful for tests, or a second API instance on another port.
 
 ## Cost
 

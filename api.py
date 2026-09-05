@@ -35,7 +35,20 @@ def _task(t: dict) -> dict:
     return out
 
 
+def _kind(root: dict) -> str:
+    """answer | plan — derived from the lead's structured output (older rows are bare plans)."""
+    s = root.get("structured")
+    if isinstance(s, str):
+        s = json.loads(s) if s else None
+    if not s:
+        return "plan"
+    return s.get("kind") or ("plan" if "subtasks" in s else "plan")
+
+
 def _chain_status(tasks: list[dict]) -> str:
+    root = tasks[0]
+    if _kind(root) == "answer" and root["status"] == "done":
+        return "answered"
     statuses = {t["status"] for t in tasks}
     if "stuck" in statuses:
         return "stuck"
@@ -67,7 +80,7 @@ def _chains(limit: int = 50) -> list[dict]:
         for t in tasks:
             roles[t["role"]] = roles.get(t["role"], 0) + 1
         out.append({
-            "chain_id": cid, "title": root["title"], "status": _chain_status(tasks),
+            "chain_id": cid, "title": root["title"], "status": _chain_status(tasks), "kind": _kind(root),
             "created_at": root["created_at"],
             "updated_at": max((t["finished_at"] or t["claimed_at"] or t["created_at"]) for t in tasks),
             "cost_usd": costs.get(cid, 0.0), "roles": roles,
@@ -157,7 +170,7 @@ def chain(chain_id: str):
             "SELECT * FROM usage WHERE chain_id=? ORDER BY created_at", (chain_id,))]
     return {
         "root": _task(root), "tasks": [_task(t) for t in tasks_], "findings": findings, "usage": usage,
-        "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_),
+        "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_), "kind": _kind(root),
         "cost_usd": sum(u["cost_usd"] for u in usage),
     }
 

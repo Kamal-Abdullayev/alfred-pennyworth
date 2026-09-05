@@ -10,13 +10,16 @@
 #   usage     per-run token/cost ledger (SDK estimate at API list price)
 
 import json
+import os
 import sqlite3
 import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "tasks.db"
+# ALFRED_DB overrides the board location — handy for tests and for running a
+# second API instance against a scratch board.
+DB_PATH = Path(os.environ.get("ALFRED_DB") or (Path(__file__).parent / "tasks.db"))
 
 # A claimed task older than this (seconds) is considered abandoned
 # (agent crashed mid-task) and gets requeued.

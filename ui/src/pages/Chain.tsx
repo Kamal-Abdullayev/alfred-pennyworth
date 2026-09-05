@@ -1,32 +1,116 @@
 import { useEffect, useState } from 'react'
 import { useParams } from 'react-router-dom'
-import { api, subscribe, fmtCost, fmtTime, type ChainDetail, type Task } from '../api'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { api, subscribe, fmtCost, fmtTime, leadOutput, codeRefPath, type ChainDetail, type Task, type Answer, type CodeRef, type Source, type Plan } from '../api'
 
-type Plan = { summary: string; parallelism: number; subtasks: { id: string; title: string; description: string; acceptance: string[]; depends_on: string[] }[] }
 type Impl = { status: string; summary: string; branch: string | null; commit_sha: string | null; files_changed: string[]; approach: string | null; verification: { commands_run: string[]; result: string; notes: string }; open_questions: string[]; blocked: { reason: string; conflict_detail: string; needs: string[] } | null }
 type Review = { verdict: string; findings: { file: string; line: number | null; severity: string; claim: string; evidence: string }[]; tests_run: { name: string; status: string; output_excerpt: string }[]; edge_cases_probed: string[] }
 
-function Structured({ task }: { task: Task }) {
-  const s = task.structured as Plan | Impl | Review | null
-  if (!s) return <span className="muted small">{task.status === 'done' ? 'no structured output' : ''}</span>
-  if (task.role === 'team_lead') {
-    const p = s as Plan
-    return (
-      <div>
-        <div>{p.summary}</div>
-        <ul className="plain">
-          {p.subtasks?.map((st) => (
-            <li key={st.id}><b>{st.title}</b> <span className="muted small">({st.id}{st.depends_on?.length ? `, after ${st.depends_on.join(', ')}` : ''})</span>
-              <div className="small">{st.description}</div>
-              <ol className="small muted">{st.acceptance?.map((a, i) => <li key={i}>{a}</li>)}</ol>
-            </li>
-          ))}
-        </ul>
+// ---------------------------------------------------------------- answers ----
+
+function CodeBlock({ code: r, src }: { code: CodeRef; src: Source }) {
+  const { abs, idea } = codeRefPath(src, r)
+  const [copied, setCopied] = useState(false)
+  const lines = r.snippet.replace(/\n$/, '').split('\n')
+  const copy = () => { navigator.clipboard?.writeText(`${abs}:${r.start_line}`).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) }) }
+  return (
+    <div className="coderef">
+      <div className="hdr">
+        <div>
+          {r.symbol && <span className="sym mono">{r.symbol}</span>}
+          <div className="path mono">{r.path}:{r.start_line}{r.end_line !== r.start_line ? `-${r.end_line}` : ''} <span className="muted">· {r.language}</span></div>
+        </div>
+        <div className="actions">
+          <a className="btn-link" href={idea} title={`Open ${abs} at line ${r.start_line} in IntelliJ`}>Open in IntelliJ</a>
+          <button className="btn-link" onClick={copy}>{copied ? 'copied' : 'copy path'}</button>
+        </div>
       </div>
-    )
+      <pre>
+        {lines.map((l, i) => (
+          <div className="line" key={i}><span className="ln">{r.start_line + i}</span><span className="src">{l || ' '}</span></div>
+        ))}
+      </pre>
+      {r.why && <div className="why">{r.why}</div>}
+    </div>
+  )
+}
+
+function AnswerView({ d, a }: { d: ChainDetail; a: Answer }) {
+  const root = d.root
+  const src = a.source
+  return (
+    <>
+      <h1><span className="pill answered">answered</span> {root.title}</h1>
+      <div className="kv card">
+        <div className="k">confidence</div><div><span className={`pill ${a.confidence}`}>{a.confidence}</span></div>
+        <div className="k">read from</div><div className="mono">{src.repo_path}{src.branch ? <span className="muted"> · {src.branch}</span> : ''}{src.commit ? <span className="muted"> @ {src.commit.slice(0, 8)}</span> : ''}</div>
+        <div className="k">asked</div><div>{fmtTime(root.created_at)} by {root.created_by} · {fmtCost(d.cost_usd)}</div>
+      </div>
+
+      <h2>Question</h2>
+      <div className="card"><pre style={{ margin: 0, whiteSpace: 'pre-wrap', font: 'inherit' }}>{root.body}</pre></div>
+
+      <h2>Answer</h2>
+      <div className="card md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{a.answer}</ReactMarkdown></div>
+
+      {a.code.length > 0 && (
+        <>
+          <h2>Code ({a.code.length})</h2>
+          {a.code.map((c, i) => <CodeBlock key={i} code={c} src={src} />)}
+        </>
+      )}
+
+      {a.citations.length > 0 && (
+        <>
+          <h2>Sources</h2>
+          <div className="card" style={{ padding: 0 }}>
+            <table><thead><tr><th>Source</th><th>Ref</th></tr></thead>
+              <tbody>{a.citations.map((c, i) => <tr key={i}><td className="mono small">{c.url ? <a href={c.url} target="_blank" rel="noreferrer">{c.source}</a> : c.source}</td><td className="small">{c.ref}</td></tr>)}</tbody>
+            </table>
+          </div>
+        </>
+      )}
+
+      <details style={{ marginTop: 18 }}><summary className="small">run details</summary>
+        <div className="card" style={{ padding: 0, marginTop: 8 }}>
+          <table><thead><tr><th>Model</th><th>Turns</th><th>Input+cache</th><th>Output</th><th>Cost</th><th>Duration</th></tr></thead>
+            <tbody>{d.usage.map((u) => <tr key={u.id}><td className="mono small">{u.model}</td><td>{u.turns ?? '—'}</td><td className="mono">{(u.input_tokens + u.cache_read_tokens + u.cache_write_tokens).toLocaleString()}</td><td className="mono">{u.output_tokens.toLocaleString()}</td><td className="mono">{fmtCost(u.cost_usd)}</td><td>{u.duration_ms ? `${Math.round(u.duration_ms / 1000)}s` : '—'}</td></tr>)}</tbody>
+          </table>
+        </div>
+      </details>
+    </>
+  )
+}
+
+// -------------------------------------------------------------- implement ----
+
+function PlanView({ p }: { p: Plan }) {
+  return (
+    <div>
+      <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{p.summary}</ReactMarkdown></div>
+      <ul className="plain">
+        {p.subtasks?.map((st) => (
+          <li key={st.id}><b>{st.title}</b> <span className="muted small">({st.id}{st.depends_on?.length ? `, after ${st.depends_on.join(', ')}` : ''})</span>
+            <div className="small">{st.description}</div>
+            <ol className="small muted">{st.acceptance?.map((a, i) => <li key={i}>{a}</li>)}</ol>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function Structured({ task }: { task: Task }) {
+  if (!task.structured) return <span className="muted small">{task.status === 'done' ? 'no structured output' : ''}</span>
+  if (task.role === 'team_lead') {
+    const lo = leadOutput(task.structured)
+    if (lo?.kind === 'plan' && lo.plan) return <PlanView p={lo.plan} />
+    if (lo?.kind === 'answer' && lo.answer) return <div className="md"><ReactMarkdown remarkPlugins={[remarkGfm]}>{lo.answer.answer}</ReactMarkdown></div>
+    return <span className="muted small">unrecognised lead output</span>
   }
   if (task.role === 'developer') {
-    const im = s as Impl
+    const im = task.structured as Impl
     return (
       <div>
         <span className={`pill ${im.status === 'done' ? 'pass' : 'stuck'}`}>{im.status}</span>
@@ -39,7 +123,7 @@ function Structured({ task }: { task: Task }) {
       </div>
     )
   }
-  const r = s as Review
+  const r = task.structured as Review
   return (
     <div>
       <span className={`pill ${r.verdict}`}>{r.verdict}</span>
@@ -60,18 +144,9 @@ function Diff({ text }: { text: string }) {
   )
 }
 
-export default function ChainPage() {
-  const { id = '' } = useParams()
-  const [d, setD] = useState<ChainDetail | null>(null)
-  const [err, setErr] = useState<string | null>(null)
+function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: () => void }) {
   const [f, setF] = useState({ file: '', line: '', severity: 'important', claim: '' })
   const [sent, setSent] = useState<string | null>(null)
-
-  const load = () => api.chain(id).then(setD).catch((e) => setErr(String(e)))
-  useEffect(() => { load(); return subscribe({ tasks: () => load() }) }, [id])
-
-  if (err) return <p className="err">{err}</p>
-  if (!d) return <p className="muted">loading…</p>
   const root = d.root
   const repo = root.project_dir
 
@@ -79,7 +154,7 @@ export default function ChainPage() {
     const r = await api.addFinding(id, { file: f.file, line: f.line ? Number(f.line) : null, severity: f.severity, claim: f.claim, evidence: 'reported by human reviewer in the UI' })
     setSent(`Sent to developer as round ${r.iteration} (task ${r.task_id})`)
     setF({ file: '', line: '', severity: 'important', claim: '' })
-    load()
+    reload()
   }
 
   return (
@@ -115,6 +190,7 @@ export default function ChainPage() {
       </div>
 
       <h2>Findings ({d.findings.length})</h2>
+      <p className="muted small" style={{ marginTop: -4 }}>Review comments on the change — from QA, from you, later from CI and merge-request reviewers. Open findings drive the next fix round.</p>
       <div className="card" style={{ padding: 0 }}>
         <table>
           <thead><tr><th>Round</th><th>Source</th><th>Severity</th><th>Where</th><th>Claim</th><th>Status</th></tr></thead>
@@ -127,7 +203,7 @@ export default function ChainPage() {
                 <td><span className={`pill ${x.status === 'open' ? 'stuck' : 'done'}`}>{x.status}</span></td>
               </tr>
             ))}
-            {d.findings.length === 0 && <tr><td colSpan={6} className="muted">none</td></tr>}
+            {d.findings.length === 0 && <tr><td colSpan={6} className="muted">none — QA passed without objections</td></tr>}
           </tbody>
         </table>
       </div>
@@ -172,4 +248,24 @@ export default function ChainPage() {
       </div>
     </>
   )
+}
+
+// ------------------------------------------------------------------- page ----
+
+export default function ChainPage() {
+  const { id = '' } = useParams()
+  const [d, setD] = useState<ChainDetail | null>(null)
+  const [err, setErr] = useState<string | null>(null)
+  const load = () => api.chain(id).then(setD).catch((e) => setErr(String(e)))
+  useEffect(() => { load(); return subscribe({ tasks: () => load() }) }, [id])
+
+  if (err) return <p className="err">{err}</p>
+  if (!d) return <p className="muted">loading…</p>
+
+  const lead = leadOutput(d.root.structured)
+  if (d.kind === 'answer' && lead?.answer) return <AnswerView d={d} a={lead.answer} />
+  if (d.kind === 'answer' && d.root.status !== 'done') {
+    return (<><h1><span className="pill running">thinking</span> {d.root.title}</h1><div className="card muted">The team lead is working on this question…</div></>)
+  }
+  return <ImplementView d={d} id={id} reload={load} />
 }

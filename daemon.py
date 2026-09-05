@@ -10,7 +10,8 @@
 # (./run_all.sh) or one at a time — the board doesn't care.
 #
 # Flow (no approval gate — the human gate is the final diff on the chain branch):
-#   job → team_lead: plan (subtasks)      → one developer task per subtask
+#   job → team_lead: answer                → chain complete (questions, lookups, diagnosis)
+#         team_lead: plan (subtasks)      → one developer task per subtask
 #         developer: implement (commit)    → qa task
 #         qa:        review (verdict+findings) → pass: chain done
 #                                             fail: developer fix task, ≤ MAX_ITERATIONS
@@ -129,6 +130,21 @@ def qa_body(dev_body: str, impl: dict, base_sha: str | None, iteration: int) -> 
     )
 
 
+def repo_state(project_dir) -> str:
+    """Appended to the team lead's prompt so it can fill Answer.source without a shell.
+    Two clones of one repo on the same machine can differ by weeks — the lead must say which it read."""
+    if not project_dir or not worktree.is_repo(project_dir):
+        return ""
+    try:
+        root = worktree.repo_root(project_dir)
+        branch = worktree._git(root, "rev-parse", "--abbrev-ref", "HEAD")
+        sha = worktree.head_sha(root)
+    except Exception:
+        return ""
+    return (f"\n\n--- Repository state (copy into source; do not guess) ---\n"
+            f"repo_path: {root}\nbranch: {branch}\ncommit: {sha}\n")
+
+
 # ------------------------------------------------------------- handoff ----
 
 def handoff(role, task, res) -> str:
@@ -144,8 +160,16 @@ def handoff(role, task, res) -> str:
 
     # ---------------------------------------------------------- team_lead --
     if role == "team_lead":
-        plan = structured
-        if not plan.get("subtasks"):
+        out = structured
+        kind = out.get("kind") or ("plan" if "subtasks" in out else None)
+        if kind == "answer":
+            ans = out.get("answer") or {}
+            src = ans.get("source") or {}
+            return (f"ANSWERED chain {chain}: {len(ans.get('answer', ''))} chars, "
+                    f"{len(ans.get('code') or [])} code ref(s), confidence={ans.get('confidence')}, "
+                    f"read {src.get('branch') or '?'}@{(src.get('commit') or '')[:8] or '?'}")
+        plan = out.get("plan") if "plan" in out else out
+        if not plan or not plan.get("subtasks"):
             board.park_chain(chain, "team lead plan has no subtasks")
             return f"chain {chain} parked: empty plan"
 
@@ -262,8 +286,9 @@ async def main(role):
         flow(f"[{role}] CLAIMED {task['id']} (chain {task['chain_id']}, round {task['iteration']}): "
              f"{task['title']}  [workdir: {task.get('project_dir') or 'workspace/'}]")
         try:
+            prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "")
             res = await run_agent(
-                cfgs[role], task["body"], task.get("project_dir"),
+                cfgs[role], prompt, task.get("project_dir"),
                 meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"]},
             )
             record_usage(task, role, res)

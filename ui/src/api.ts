@@ -6,8 +6,10 @@ export type Task = {
   iteration: number; created_by: string; claimed_by: string | null
   created_at: number; claimed_at: number | null; finished_at: number | null
 }
+export type Kind = 'plan' | 'answer'
 export type Chain = {
-  chain_id: string; title: string; status: 'running' | 'passed' | 'failed' | 'stuck' | 'done' | string
+  chain_id: string; title: string; status: 'running' | 'passed' | 'failed' | 'stuck' | 'done' | 'answered' | string
+  kind: Kind
   created_at: number; updated_at: number; cost_usd: number; roles: Record<string, number>
   project_dir: string | null; iteration: number; tasks: number
 }
@@ -22,7 +24,31 @@ export type Usage = {
 }
 export type ChainDetail = {
   root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]
-  diff: string | null; log: string | null; branch: string; status: string; cost_usd: number
+  diff: string | null; log: string | null; branch: string; status: string; kind: Kind; cost_usd: number
+}
+
+// --- the team lead's structured output ---------------------------------------
+export type Subtask = { id: string; title: string; description: string; acceptance: string[]; depends_on: string[] }
+export type Plan = { summary: string; parallelism: number; subtasks: Subtask[] }
+export type CodeRef = { path: string; start_line: number; end_line: number; symbol: string | null; language: string; snippet: string; why: string }
+export type Source = { repo_path: string; branch: string | null; commit: string | null }
+export type Citation = { source: string; ref: string; url: string | null }
+export type Answer = { answer: string; code: CodeRef[]; source: Source; citations: Citation[]; confidence: 'low' | 'medium' | 'high' }
+export type LeadOutput = { kind: Kind; plan: Plan | null; answer: Answer | null }
+
+/** Older rows stored a bare Plan; normalise everything to LeadOutput. */
+export function leadOutput(structured: unknown): LeadOutput | null {
+  if (!structured || typeof structured !== 'object') return null
+  const s = structured as Record<string, unknown>
+  if (s.kind === 'answer' || s.kind === 'plan') return s as unknown as LeadOutput
+  if ('subtasks' in s) return { kind: 'plan', plan: s as unknown as Plan, answer: null }
+  return null
+}
+
+/** Absolute path of a code reference, and the IntelliJ deep link for it. */
+export function codeRefPath(src: Source, ref: CodeRef) {
+  const abs = `${src.repo_path.replace(/\/$/, '')}/${ref.path.replace(/^\//, '')}`
+  return { abs, idea: `idea://open?file=${encodeURIComponent(abs)}&line=${ref.start_line}` }
 }
 export type Agent = {
   role: string; name: string; model: string; contract: string; permission_mode: string
