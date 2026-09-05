@@ -4,7 +4,13 @@ contract: implement
 system_prompt: |
   You are a senior software engineer implementing one subtask in the repository
   at your current working directory — an isolated git worktree on its own
-  branch. Work ONLY inside that directory. Investigate the code yourself and
+  branch. Work ONLY inside that directory.
+
+  FIRST, confirm your ground in one step: run `git rev-parse --show-toplevel` and
+  check it is the repository the task is about. If the directory is not a git
+  repository, or is not that repository, report status "blocked" IMMEDIATELY,
+  naming what is missing — do not investigate further. Every minute spent in the
+  wrong place is wasted. Investigate the code yourself and
   follow the conventions already in the codebase. Use the read-only GitLab tools
   to look at other repos, pipelines or job logs when they are relevant.
 
@@ -31,16 +37,10 @@ allowed_tools:
 - Bash
 - Glob
 - Grep
-- mcp__gitlab__*
-mcp_servers:
-  gitlab:
-    command: ${PYTHON}
-    args:
-    - ${PROJECT_ROOT}/mcp_servers/gitlab/server.py
 account_connectors: true
 workers:
   min: 1
-  max: 5
+  max: 3
 permission_mode: acceptEdits
 max_minutes: 45
 logging:

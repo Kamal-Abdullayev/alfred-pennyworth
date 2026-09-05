@@ -124,3 +124,5 @@ ul.plain { margin: 6px 0; padding-left: 18px; }
 .md th, .md td { overflow-wrap: break-word; word-break: normal; white-space: normal; hyphens: none; }
 .md td:first-child, .md th:first-child { white-space: nowrap; }
 .md td code, .md th code { white-space: nowrap; }
+
+.pill.closed { color: var(--muted); border-color: var(--border); text-decoration: line-through; } .pill.not_dispatched { color: var(--warn); border-color: var(--warn); }

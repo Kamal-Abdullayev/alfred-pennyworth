@@ -53,8 +53,12 @@ def _chain_status(tasks: list[dict]) -> str:
     if _kind(root) == "answer" and root["status"] == "done":
         return "answered"
     statuses = {t["status"] for t in tasks}
+    if board.chain_is_closed(root["chain_id"]) or ("closed" in statuses and not (statuses & {"open", "claimed", "stuck"})):
+        return "closed"
     if "stuck" in statuses:
         return "stuck"
+    if _kind(root) == "plan" and len(tasks) == 1 and root["status"] == "done" and not (root.get("project_dir") and os.path.isdir(root["project_dir"])):
+        return "not_dispatched"
     if statuses & {"open", "claimed"}:
         return "running"
     if "failed" in statuses:
@@ -411,6 +415,48 @@ def conversation_delete(cid: str):
         raise HTTPException(404, f"no conversation {cid}")
     board.delete_conversation(cid)
     return {"deleted": cid}
+
+
+class ChainActionIn(BaseModel):
+    action: str                      # requeue | close | dispatch
+    reason: str | None = None
+    project_dir: str | None = None   # for dispatch
+
+
+@app.post("/api/chains/{chain_id}/actions")
+def chain_action(chain_id: str, a: ChainActionIn):
+    """Human actions on a chain. requeue: stuck tasks become open again. close: dismiss the
+    chain (no more attention needed). dispatch: create the developer tasks from a plan that
+    was not dispatched (no repository), using the given repository path."""
+    root = board.chain_root(chain_id)
+    if not root:
+        raise HTTPException(404, f"no chain {chain_id}")
+    if a.action == "requeue":
+        n = board.requeue_chain(chain_id)
+        daemon.flow(f"[human] REQUEUED chain {chain_id}: {n} task(s) back to open")
+        return {"requeued": n}
+    if a.action == "close":
+        n = board.close_chain(chain_id, a.reason or "closed by human")
+        daemon.flow(f"[human] CLOSED chain {chain_id}: {a.reason or 'no reason given'}")
+        return {"closed": n}
+    if a.action == "dispatch":
+        if not a.project_dir:
+            raise HTTPException(400, "project_dir required")
+        p = Path(a.project_dir).expanduser()
+        if not p.is_dir():
+            raise HTTPException(400, f"project_dir does not exist: {p}")
+        lo = _task(root)["structured"] or {}
+        plan = lo.get("plan") if lo.get("kind") == "plan" else (lo if "subtasks" in lo else None)
+        if not plan or not plan.get("subtasks"):
+            raise HTTPException(400, "this chain has no plan to dispatch")
+        if len([t for t in board.snapshot() if t["chain_id"] == chain_id]) > 1:
+            raise HTTPException(409, "this plan was already dispatched")
+        board.set_task_project_dir(root["id"], str(p.resolve()))
+        root = board.get_task(root["id"])
+        outcome = daemon.handoff("team_lead", root, {"structured": {"kind": "plan", "plan": plan, "answer": None}})
+        daemon.flow(f"[human] DISPATCHED plan for chain {chain_id} into {p.resolve()} — {outcome}")
+        return {"dispatched": True, "outcome": outcome}
+    raise HTTPException(400, f"unknown action {a.action}")
 
 
 class FindingIn(BaseModel):

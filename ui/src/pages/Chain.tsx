@@ -106,6 +106,40 @@ function Diff({ text }: { text: string }) {
   )
 }
 
+function HumanActions({ d, id, reload }: { d: ChainDetail; id: string; reload: () => void }) {
+  const [repoPath, setRepoPath] = useState(d.root.project_dir ?? '')
+  const [msg, setMsg] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const stuckCount = d.tasks.filter((t) => t.status === 'stuck').length
+  const notDispatched = d.status === 'not_dispatched'
+  if (!['stuck', 'failed', 'not_dispatched'].includes(d.status)) return null
+  async function act(body: { action: 'requeue' | 'close' | 'dispatch'; reason?: string; project_dir?: string }) {
+    setBusy(true); setMsg(null)
+    try { const r = await api.chainAction(id, body); setMsg(JSON.stringify(r)); reload() } catch (e) { setMsg(String(e)) } finally { setBusy(false) }
+  }
+  return (
+    <div className="card" style={{ borderColor: 'var(--warn)' }}>
+      <b><span className={`pill ${d.status}`}>{d.status.replace('_', ' ')}</span> this chain needs a human</b>
+      <div className="small muted" style={{ margin: '6px 0 10px' }}>
+        {notDispatched && 'The lead produced a plan but no repository was given, so nothing was dispatched.'}
+        {d.status === 'stuck' && `${stuckCount} task(s) are parked${d.root.result?.includes('parked:') ? `: ${d.root.result.split('parked:').pop()?.trim().slice(0, 200)}` : ''}. Fix the cause (repository, connector, credentials…) then requeue, or close the chain if it should not continue.`}
+        {d.status === 'failed' && 'A run ended in error. Requeue to try again, or close the chain.'}
+      </div>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
+        {notDispatched && (
+          <>
+            <input className="mono" style={{ maxWidth: 420 }} placeholder="/Users/you/Desktop/projects/<repo>" value={repoPath} onChange={(e) => setRepoPath(e.target.value)} />
+            <button disabled={busy || !repoPath.trim()} onClick={() => act({ action: 'dispatch', project_dir: repoPath.trim() })}>Dispatch plan into this repository</button>
+          </>
+        )}
+        {stuckCount > 0 && <button className="secondary" disabled={busy} onClick={() => act({ action: 'requeue' })}>Requeue {stuckCount} stuck task(s)</button>}
+        <button className="secondary" disabled={busy} onClick={() => act({ action: 'close', reason: 'closed from the chain page' })}>Close chain — needs no more attention</button>
+      </div>
+      {msg && <div className="small muted" style={{ marginTop: 6 }}>{msg}</div>}
+    </div>
+  )
+}
+
 function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: () => void }) {
   const [f, setF] = useState({ file: '', line: '', severity: 'important', claim: '' })
   const [sent, setSent] = useState<string | null>(null)
@@ -133,6 +167,7 @@ function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: 
       <h2>Job</h2>
       <div className="card"><pre style={{ margin: 0, whiteSpace: 'pre-wrap', font: 'inherit' }}>{root.body}</pre></div>
 
+      <HumanActions d={d} id={id} reload={reload} />
       <h2>Timeline</h2>
       <div className="timeline">
         {d.tasks.map((t) => (

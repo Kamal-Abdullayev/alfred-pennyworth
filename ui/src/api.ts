@@ -133,6 +133,8 @@ export const api = {
   conversation: (id: string) => j<ConversationDetail>(`/api/conversations/${id}`),
   renameConversation: (id: string, title: string) => j<unknown>(`/api/conversations/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),
   deleteConversation: (id: string) => j<unknown>(`/api/conversations/${id}`, { method: 'DELETE' }),
+  chainAction: (chain: string, body: { action: 'requeue' | 'close' | 'dispatch'; reason?: string; project_dir?: string }) =>
+    j<Record<string, unknown>>(`/api/chains/${chain}/actions`, { method: 'POST', body: JSON.stringify(body) }),
   addFinding: (chain: string, f: { file: string; line: number | null; severity: string; claim: string; evidence: string }) =>
     j<{ task_id: string; iteration: number }>(`/api/chains/${chain}/findings`, { method: 'POST', body: JSON.stringify(f) }),
 }
