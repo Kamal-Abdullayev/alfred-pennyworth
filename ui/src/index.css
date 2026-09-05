@@ -126,3 +126,5 @@ ul.plain { margin: 6px 0; padding-left: 18px; }
 .md td code, .md th code { white-space: nowrap; }
 
 .pill.closed { color: var(--muted); border-color: var(--border); text-decoration: line-through; } .pill.not_dispatched { color: var(--warn); border-color: var(--warn); }
+
+.diagram { margin: 10px 0; } .mermaid-host { background: #0b0d12; border: 1px solid var(--border); border-radius: 8px; padding: 12px; overflow-x: auto; } .mermaid-host svg { max-width: 100%; height: auto; }

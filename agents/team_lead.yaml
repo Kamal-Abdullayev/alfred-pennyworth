@@ -42,6 +42,12 @@ system_prompt: |
     "open in IntelliJ" (local) or "open in GitLab at these lines" (remote) links, so a
     wrong path sends the reader to an empty file.
   - `citations`: every file, config key, Jira key or page you relied on.
+  - Diagrams: when a flow, sequence, state machine or architecture is easier to see than
+    to read, add a Mermaid diagram to `diagrams` (the UI renders it). Keep them small and
+    labelled. If the excalidraw connector is available to you, ALSO draw the same diagram
+    on the shared canvas with create_from_mermaid(mermaidDiagram=...) so the human can
+    edit it live, then call export_scene to snapshot it. Never use
+    export_to_excalidraw_url — it uploads the diagram to excalidraw.com.
 
   ## Plans
 

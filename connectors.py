@@ -202,6 +202,10 @@ def role_servers(role: str) -> tuple[dict, list[str]]:
             continue
         if row["kind"] != CLAUDE_AI_KIND:          # claude.ai servers are already in the session
             servers[row["name"]] = server_config(row)
+        if row.get("trust_writes"):
+            # a scratch tool (e.g. a drawing canvas): every tool is allowed, mutating or not
+            rules.append(f"mcp__{row['name']}__*")
+            continue
         for t in board.connector_tools(row["name"]):
             if not t["mutates"]:
                 rules.append(f"mcp__{row['name']}__{t['tool']}")

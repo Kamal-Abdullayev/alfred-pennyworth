@@ -166,7 +166,10 @@ function ConnectorCard({ c, roles, open, onToggle, busy, run }: { c: Connector; 
             <span className={`pill ${r}`}>{r}</span>
           </label>
         ))}
-        <span className="muted small">· {c.tool_count} tool{c.tool_count === 1 ? '' : 's'}{c.tool_count ? `, ${c.mutating} mutating (denied)` : ' — run Test to discover'}</span>
+        <span className="muted small">· {c.tool_count} tool{c.tool_count === 1 ? '' : 's'}{c.tool_count ? (c.trust_writes ? `, all allowed (writes marked safe)` : `, ${c.mutating} mutating (denied)`) : ' — run Test to discover'}</span>
+        <label className="small" style={{ display: 'flex', gap: 4, alignItems: 'center' }} title="Only for scratch tools like a drawing canvas — never for Jira, GitLab, databases or mail">
+          <input type="checkbox" style={{ width: 'auto' }} checked={!!c.trust_writes} disabled={busy !== null} onChange={(e) => run('trust:' + c.name, () => api.setTrustWrites(c.name, e.target.checked))} /> writes are safe
+        </label>
         {c.yaml_used_by.length > 0 && <span className="pill stuck">shadowed by YAML for {c.yaml_used_by.join(', ')}</span>}
       </div>
 

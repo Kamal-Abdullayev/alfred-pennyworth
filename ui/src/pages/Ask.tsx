@@ -37,7 +37,7 @@ function toSteps(events: TranscriptEvent[]): Step[] {
         else if (tool === 'StructuredOutput') s = { id: '', cls: 'say', lab: 'Answering', txt: 'composing the structured answer' }
         else if (tool.startsWith('mcp__')) {
           const [, server, name] = tool.split('__', 3)
-          const lab = /gitlab/i.test(server ?? '') ? 'GitLab' : /jira|atlassian/i.test(server ?? '') ? (/confluence/i.test(name ?? '') ? 'Confluence' : 'Jira') : /365|outlook|teams/i.test(server ?? '') ? 'M365' : 'Tool'
+          const lab = /excalidraw/i.test(server ?? '') ? 'Drawing' : /gitlab/i.test(server ?? '') ? 'GitLab' : /jira|atlassian/i.test(server ?? '') ? (/confluence/i.test(name ?? '') ? 'Confluence' : 'Jira') : /365|outlook|teams/i.test(server ?? '') ? 'M365' : 'Tool'
           const key = inp.issue_key ?? inp.key ?? inp.project ?? inp.file_path ?? inp.query ?? inp.sql ?? inp.mr_iid ?? inp.pageId ?? inp.jql ?? ''
           s = { id: '', cls: 'remote', lab, txt: `${name}${key ? `  ${String(key).slice(0, 100)}` : ''}` }
         } else s = { id: '', cls: 'run', lab: tool, txt: JSON.stringify(inp).slice(0, 140) }
@@ -75,6 +75,20 @@ function Steps({ steps, live }: { steps: Step[]; live: boolean }) {
   )
 }
 
+function LiveCanvas({ url }: { url: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div className="actions" style={{ alignItems: 'center' }}>
+        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'hide' : 'show'} live canvas</button>
+        <a className="btn-link" href={url} target="_blank" rel="noreferrer">open canvas in a tab</a>
+        <span className="muted small">the lead drew on the shared Excalidraw canvas — edit it here; exports work while this is open</span>
+      </div>
+      {open && <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: 560, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, background: '#fff' }} />}
+    </div>
+  )
+}
+
 function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void }) {
   const [showSteps, setShowSteps] = useState(false)
   const steps = toSteps(live.events)
@@ -83,6 +97,7 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
   const lead = leadOutput(live.detail?.root.structured ?? turn.structured)
   const links = live.detail?.code_links ?? []
   const last = steps[steps.length - 1]
+  const drew = live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
   const headline = running
     ? (live.status === 'open' || turn.status === 'open' ? 'waiting for the team lead to pick this up…' : 'team lead is working…')
     : `${lead?.kind === 'answer' ? 'answered' : turn.status} · ${live.eventsLoaded ? `${steps.length} steps` : 'show what it did'}`
@@ -97,7 +112,8 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
       </div>
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
-      {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact /></div>}
+      {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
+      {drew && <LiveCanvas url={live.detail?.canvas_url ?? 'http://localhost:3000'} />}
       {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
           {dispatched

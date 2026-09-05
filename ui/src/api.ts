@@ -28,7 +28,7 @@ export type Turn = {
   est_cost_usd: number; tools: string[]; text_chars: number; created_at: number
 }
 export type ChainDetail = {
-  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]; code_links: CodeLink[]
+  root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]; code_links: CodeLink[]; assets: Asset[]; canvas_url: string
   diff: string | null; log: string | null; branch: string; status: string; kind: Kind; cost_usd: number
 }
 
@@ -40,7 +40,9 @@ export type Source = { repo_path: string | null; gitlab_project?: string | null;
 export type CodeLink = { path: string; abs: string | null; exists: boolean; idea: string | null; web: string | null }
 export type FlowRow = { ts: string; role: string; action: string; task: string; detail: string }
 export type Citation = { source: string; ref: string; url: string | null }
-export type Answer = { answer: string; code: CodeRef[]; source: Source; citations: Citation[]; confidence: 'low' | 'medium' | 'high' }
+export type Diagram = { title: string; description: string; mermaid: string }
+export type Asset = { task_id: string; name: string; kind: 'image' | 'scene' | 'file'; bytes: number; url: string }
+export type Answer = { answer: string; code: CodeRef[]; diagrams?: Diagram[]; source: Source; citations: Citation[]; confidence: 'low' | 'medium' | 'high' }
 export type LeadOutput = { kind: Kind; plan: Plan | null; answer: Answer | null }
 
 /** Older rows stored a bare Plan; normalise everything to LeadOutput. */
@@ -82,7 +84,7 @@ export type ConversationTurn = { chain_id: string; question: string; status: str
 export type ConversationDetail = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: ConversationTurn[] }
 export type Connector = {
   name: string; template: string | null; kind: 'stdio' | 'http' | 'sse' | 'claude-ai'; command: string | null; args: string[]; url: string | null
-  provider: 'configured' | 'claude-account'; masked_config: Record<string, unknown> | null
+  provider: 'configured' | 'claude-account'; masked_config: Record<string, unknown> | null; trust_writes: number
   env: Record<string, FieldState>; headers: Record<string, FieldState>; enabled: number; note: string | null
   last_test_at: number | null; last_test_status: 'ok' | 'failed' | null; last_test_error: string | null
   roles: string[]; tools: ConnectorTool[]; tool_count: number; mutating: number; yaml_used_by: string[]
@@ -117,6 +119,7 @@ export const api = {
   testConnector: (name: string) => j<{ ok: boolean; error: string | null; tools?: ConnectorTool[]; mutating?: number; connector: Connector }>(`/api/connectors/${name}/test`, { method: 'POST' }),
   setConnectorRoles: (name: string, roles: string[]) => j<{ roles: string[] }>(`/api/connectors/${name}/roles`, { method: 'PUT', body: JSON.stringify({ roles }) }),
   setToolMutates: (name: string, tool: string, mutates: boolean) => j<unknown>(`/api/connectors/${name}/tools/${encodeURIComponent(tool)}`, { method: 'PUT', body: JSON.stringify({ mutates }) }),
+  setTrustWrites: (name: string, trust: boolean) => j<unknown>(`/api/connectors/${name}/trust_writes`, { method: 'PUT', body: JSON.stringify({ trust_writes: trust }) }),
   setConnectorEnabled: (name: string, enabled: boolean) => j<unknown>(`/api/connectors/${name}/enabled`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   deleteConnector: (name: string) => j<unknown>(`/api/connectors/${name}`, { method: 'DELETE' }),
   connectorLog: (name: string) => j<LogEntry[]>(`/api/connectors/${name}/log?limit=150`),
