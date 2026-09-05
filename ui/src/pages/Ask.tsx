@@ -75,16 +75,22 @@ function Steps({ steps, live }: { steps: Step[]; live: boolean }) {
   )
 }
 
-function LiveCanvas({ url }: { url: string }) {
+/** The Excalidraw MCP converts Mermaid inside a connected browser and only exports images
+ *  through one. This keeps the canvas frontend loaded (collapsed to a strip) for as long as the
+ *  Ask page is open, so the lead can draw while you watch and snapshots include a PNG. */
+function CanvasKeeper({ url, configured }: { url: string; configured: boolean }) {
   const [open, setOpen] = useState(false)
+  if (!configured) return null
   return (
-    <div style={{ marginTop: 10 }}>
-      <div className="actions" style={{ alignItems: 'center' }}>
-        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'hide' : 'show'} live canvas</button>
-        <a className="btn-link" href={url} target="_blank" rel="noreferrer">open canvas in a tab</a>
-        <span className="muted small">the lead drew on the shared Excalidraw canvas — edit it here; exports work while this is open</span>
+    <div className="card" style={{ padding: open ? 8 : '6px 12px', marginBottom: 12 }}>
+      <div className="actions" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+        <span className="small"><span className="pill answered">canvas</span> Excalidraw is connected through this page{open ? '' : ' (collapsed)'}</span>
+        <button className="btn-link" onClick={() => setOpen(!open)}>{open ? 'collapse' : 'show live canvas'}</button>
+        <a className="btn-link" href={url} target="_blank" rel="noreferrer">open in a tab</a>
+        <button className="btn-link" onClick={() => api.canvasClear().catch(() => {})} title="wipe the shared canvas">clear canvas</button>
+        <span className="muted small">keep this page open while the lead draws; saved scenes live under each answer</span>
       </div>
-      {open && <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: 560, border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, background: '#fff' }} />}
+      <iframe src={url} title="Excalidraw canvas" style={{ width: '100%', height: open ? 600 : 1, opacity: open ? 1 : 0, border: open ? '1px solid var(--border)' : 0, borderRadius: 8, marginTop: open ? 8 : 0, background: '#fff', display: 'block' }} />
     </div>
   )
 }
@@ -113,7 +119,7 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
-      {drew && <LiveCanvas url={live.detail?.canvas_url ?? 'http://localhost:3000'} />}
+      {drew && <div className="small muted" style={{ marginTop: 8 }}>drew on the shared canvas — see the canvas strip at the top of this page, or "show on canvas" under the answer</div>}
       {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
           {dispatched
@@ -140,6 +146,7 @@ export default function Ask() {
   const [project, setProject] = useState(() => { try { return localStorage.getItem(PROJECT_KEY) ?? '' } catch { return '' } })
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  const [canvas, setCanvas] = useState<{ url: string; configured: boolean }>({ url: 'http://localhost:3000', configured: false })
   const closers = useRef<Record<string, () => void>>({})
   const bottom = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -166,7 +173,7 @@ export default function Ask() {
     window.addEventListener('scroll', onScroll, { passive: true })
     return () => window.removeEventListener('scroll', onScroll)
   }, [])
-  useEffect(() => { loadConvs() }, [])
+  useEffect(() => { loadConvs(); api.canvas().then(setCanvas).catch(() => {}) }, [])
   useEffect(() => {
     Object.values(closers.current).forEach((c) => c()); closers.current = {}
     setLives({}); setTurns([]); setTitle('')
@@ -228,6 +235,7 @@ export default function Ask() {
           {cid && <span className="actions"><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
         </div>
         {err && <p className="err">{err}</p>}
+        <CanvasKeeper url={canvas.url} configured={canvas.configured} />
         <div className="chat">
           {!cid && <div className="card muted small">Ask the team lead anything about your systems — a ticket, a merge request, how something works, why a pipeline is red. You'll see what it reads and runs while it works, then the answer with the code it relied on. Give a repository path below if the question is about local code; otherwise it reads through GitLab. Follow-ups in the same conversation carry the earlier answers as context.</div>}
           {turns.map((t) => (

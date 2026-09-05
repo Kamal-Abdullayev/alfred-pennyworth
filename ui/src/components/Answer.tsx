@@ -2,7 +2,7 @@ import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import type { Answer, Asset, CodeRef, CodeLink, Plan } from '../api'
+import { api, type Answer, type Asset, type CodeRef, type CodeLink, type Plan } from '../api'
 
 const mdComponents = {
   // a wide table scrolls inside its own box instead of squeezing columns until words break
@@ -61,21 +61,37 @@ export function Mermaid({ code, title }: { code: string; title?: string }) {
     })
     return () => { alive = false }
   }, [code])
+  const download = () => {
+    const svg = ref.current?.querySelector('svg')
+    if (!svg) return
+    const blob = new Blob([new XMLSerializer().serializeToString(svg)], { type: 'image/svg+xml' })
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${(title || 'diagram').replace(/[^\w-]+/g, '_')}.svg`; a.click(); URL.revokeObjectURL(a.href)
+  }
+  const copySource = () => { navigator.clipboard?.writeText(code) }
   return (
     <div className="diagram">
-      {title && <div className="small" style={{ marginBottom: 4 }}><b>{title}</b></div>}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+        {title ? <span className="small"><b>{title}</b></span> : <span />}
+        <span className="actions"><button className="btn-link" onClick={download}>download SVG</button><button className="btn-link" onClick={copySource}>copy Mermaid</button></span>
+      </div>
       {err ? <pre className="log small">{code}\n\n{err}</pre> : <div ref={ref} className="mermaid-host" />}
     </div>
   )
 }
 
 export function Assets({ assets }: { assets: Asset[] }) {
+  const [msg, setMsg] = useState<string | null>(null)
   if (!assets.length) return null
+  const show = (a: Asset) => api.canvasShow(a.task_id, a.name).then((r) => setMsg(`on the canvas: ${r.message}`)).catch((e) => setMsg(String(e)))
   return (
     <div style={{ marginTop: 10 }}>
       {assets.map((a) => a.kind === 'image'
         ? <div key={a.url} className="diagram"><img src={a.url} alt={a.name} style={{ maxWidth: '100%', borderRadius: 8, border: '1px solid var(--border)' }} /><div className="muted small">{a.name}</div></div>
-        : <a key={a.url} className="btn-link" href={a.url} download={a.name} style={{ marginRight: 8 }}>download {a.name} ({(a.bytes / 1024).toFixed(0)} kB)</a>)}
+        : <span key={a.url} className="actions" style={{ display: 'inline-flex', marginRight: 10, marginBottom: 6 }}>
+            {a.kind === 'scene' && <button className="btn-link" onClick={() => show(a)} title="clears the shared canvas and loads this diagram">show on canvas</button>}
+            <a className="btn-link" href={a.url} download={a.name}>download {a.name} ({(a.bytes / 1024).toFixed(0)} kB)</a>
+          </span>)}
+      {msg && <div className="muted small">{msg}</div>}
     </div>
   )
 }

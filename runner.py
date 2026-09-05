@@ -36,6 +36,8 @@ load_dotenv(ROOT / ".env", override=True)
 
 # SDK-internal tools that must never be gated: StructuredOutput carries the answer.
 ALWAYS_ALLOWED = {"StructuredOutput"}
+# Tools that send data off the machine and are never allowed, whatever the allowlist says.
+ALWAYS_DENIED = {"mcp__excalidraw__export_to_excalidraw_url"}   # uploads the diagram to excalidraw.com
 
 
 def _expand_env(obj, mapping):
@@ -51,6 +53,8 @@ def _expand_env(obj, mapping):
 
 def is_allowed(tool: str, rules: list[str]) -> bool:
     """Allow rules are bare tool names or prefix wildcards like mcp__gitlab__*."""
+    if tool in ALWAYS_DENIED:
+        return False
     if tool in ALWAYS_ALLOWED:
         return True
     for r in rules:
@@ -202,11 +206,27 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
             log_event(log, "hook_error", {"where": "pre_tool", "error": repr(e)})
         return {}
 
+    used_canvas = {"yes": False}
+
+    def _blocks(response):
+        """tool_response arrives as a list, a dict, a JSON string or a Python-repr string."""
+        if isinstance(response, str):
+            for parser in (json.loads, __import__("ast").literal_eval):
+                try:
+                    response = parser(response)
+                    break
+                except Exception:
+                    continue
+        if isinstance(response, dict) and "content" in response:
+            response = response["content"]
+        return response if isinstance(response, list) else [response]
+
     def _capture_asset(tool, response):
         """Excalidraw exports become files of the run: scene JSON, PNG/SVG images."""
         if not tool.startswith("mcp__excalidraw__") or not meta.get("id"):
             return
-        blocks = response if isinstance(response, list) else [response]
+        used_canvas["yes"] = True
+        blocks = _blocks(response)
         out_dir = ROOT / "data" / "assets" / str(meta["id"])
         for b in blocks:
             if not isinstance(b, dict):
@@ -315,6 +335,15 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
     elif contract:
         log_event(log, "contract_missing", {"contract": contract, "subtype": out["subtype"]})
         human(hlog, "  CONTRACT MISSING: run ended without structured output")
+
+    if used_canvas["yes"] and meta.get("id"):
+        try:
+            saved = await connectors.excalidraw_snapshot_async(str(meta["id"]))
+            for a in saved:
+                log_event(log, "asset", {"tool": "runner", "kind": a["kind"], "path": a["path"]})
+            human(hlog, f"  CANVAS:  snapshot saved {[a['kind'] for a in saved]}")
+        except Exception as e:  # noqa: BLE001 — never fail a run over a screenshot
+            log_event(log, "hook_error", {"where": "excalidraw_snapshot", "error": repr(e)})
 
     result = {**out, "structured": structured, "contract": contract, "denied": denied}
     del result["structured_raw"]

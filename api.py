@@ -712,6 +712,36 @@ def asset_file(task_id: str, name: str):
     return FileResponse(p, media_type=media)
 
 
+@app.get("/api/canvas")
+def canvas_info():
+    return {"url": board.get_setting("excalidraw_canvas_url", "http://localhost:3000"),
+            "configured": board.get_connector("excalidraw") is not None}
+
+
+@app.post("/api/canvas/show")
+def canvas_show(body: dict):
+    """Put a saved scene (an asset of a run) back on the shared Excalidraw canvas."""
+    task_id, name = str(body.get("task_id", "")), str(body.get("name", ""))
+    try:
+        msg = conn.excalidraw_show(task_id, name)
+    except FileNotFoundError:
+        raise HTTPException(404, "no such scene")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, conn.mask(f"{type(e).__name__}: {e}"))
+    return {"ok": True, "message": msg}
+
+
+@app.post("/api/canvas/clear")
+def canvas_clear():
+    try:
+        import asyncio as _a
+        _a.run(conn.excalidraw_call("clear_canvas", {}))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, conn.mask(f"{type(e).__name__}: {e}"))
+    conn.log("excalidraw", "cleared", "canvas cleared from the UI")
+    return {"ok": True}
+
+
 @app.put("/api/connectors/{name}/enabled")
 def connector_enabled(name: str, body: dict):
     board.set_connector_enabled(name, bool(body.get("enabled")))
