@@ -56,7 +56,12 @@ export type Agent = {
   role: string; name: string; model: string; contract: string; permission_mode: string
   max_minutes: number; max_turns: number | null; builtin_tools: string[]; allowed_tools: string[]
   mcp_servers: string[]; system_prompt: string; path: string
+  account_connectors: boolean; workers: { min: number; max: number }; logging: Record<string, unknown>; raw: Record<string, unknown>
 }
+export type AgentsResponse = { agents: Agent[]; options: { models: string[]; contracts: string[]; builtin_tools: string[]; permission_modes: string[] } }
+export type AgentIn = { model: string; contract: string; system_prompt: string; builtin_tools: string[]; allowed_tools: string[]; permission_mode: string; max_minutes: number; max_turns: number | null; account_connectors: boolean; workers: { min: number; max: number } }
+export type Worker = { pid: number; role: string; ephemeral: number; started_at: number; last_seen: number; current_task: string | null; current_title: string | null; current_chain: string | null; host: string | null }
+export type WorkersResponse = { workers: Worker[]; open: Record<string, number>; max_workers: number }
 export type UsageSummary = {
   days: number
   by_day: { day: string; role: string; model: string; cost: number; in_tok: number; out_tok: number; runs: number }[]
@@ -99,7 +104,12 @@ export const api = {
   chains: () => j<Chain[]>('/api/chains'),
   chain: (id: string) => j<ChainDetail>(`/api/chains/${id}`),
   tasks: () => j<Task[]>('/api/tasks'),
-  agents: () => j<Agent[]>('/api/agents'),
+  agents: () => j<AgentsResponse>('/api/agents'),
+  updateAgent: (role: string, a: AgentIn) => j<unknown>(`/api/agents/${role}`, { method: 'PUT', body: JSON.stringify(a) }),
+  createAgent: (role: string, clone_from: string) => j<unknown>('/api/agents', { method: 'POST', body: JSON.stringify({ role, clone_from }) }),
+  deleteAgent: (role: string) => j<unknown>(`/api/agents/${role}`, { method: 'DELETE' }),
+  workers: () => j<WorkersResponse>('/api/workers'),
+  setMaxWorkers: (n: number) => j<unknown>('/api/settings/max_workers', { method: 'PUT', body: JSON.stringify({ max_workers: n }) }),
   connectors: () => j<ConnectorsResponse>('/api/connectors'),
   templates: () => j<Record<string, Template>>('/api/connectors/templates'),
   saveConnector: (c: ConnectorIn) => j<Connector>('/api/connectors', { method: 'POST', body: JSON.stringify(c) }),

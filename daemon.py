@@ -184,9 +184,13 @@ def handoff(role, task, res) -> str:
             where = f"in place: {workdir or 'workspace/'}"
 
         ids = []
+        roles = set(configs())
         for st in plan["subtasks"]:
+            role_for = st.get("role") if st.get("role") in roles else "developer"
+            if st.get("role") and st["role"] not in roles:
+                flow(f"[team_lead] plan asked for role {st['role']!r} which does not exist — using developer")
             ids.append(board.create_task(
-                role="developer",
+                role=role_for,
                 title=f"implement: {st['title']}"[:80],
                 body=developer_body(root["body"], st),
                 created_by="team_lead",
@@ -198,7 +202,7 @@ def handoff(role, task, res) -> str:
                 f"parallelism={plan.get('parallelism')} — {where}")
 
     # ---------------------------------------------------------- developer --
-    if role == "developer":
+    if role not in ("team_lead", "qa"):    # developer and any specialist role that implements
         impl = structured
         if impl.get("status") == "blocked":
             b = impl.get("blocked") or {}
@@ -208,7 +212,7 @@ def handoff(role, task, res) -> str:
             role="qa",
             title=f"verify: {task['title'].removeprefix('implement: ').removeprefix('fix: ')}"[:80],
             body=qa_body(task["body"], impl, root.get("base_sha"), task["iteration"]),
-            created_by="developer",
+            created_by=role,
             chain_id=chain,
             iteration=task["iteration"],
             project_dir=task.get("project_dir"),
@@ -266,7 +270,10 @@ def record_usage(task, role, res):
 
 # ---------------------------------------------------------------- loop ----
 
-async def main(role):
+async def main(role, ephemeral=False, idle_exit_s=90):
+    """One worker for one role. Ephemeral workers are started by supervisor.py when the
+    queue for their role backs up; they exit after idle_exit_s seconds without a task."""
+    import os
     cfgs = configs()
     if role not in cfgs:
         sys.exit(f"unknown role {role!r}. roles are agents/*.yaml: {', '.join(cfgs)}")
@@ -276,45 +283,61 @@ async def main(role):
     (ROOT / "logs" / "tasks").mkdir(exist_ok=True)
     for suffix in (".jsonl", ".log"):
         (ROOT / "logs" / f"{role}{suffix}").touch()
-    agent_name = f"{role}-daemon"
+    pid = os.getpid()
+    agent_name = f"{role}-{pid}"
+    idle_since = time.time()
+    board.worker_heartbeat(pid, role, ephemeral)
     if role == "team_lead":
         print(f"[{role}] also watching {INBOX}/ for .md/.txt job files")
-    print(f"[{role}] watching the board (ctrl-c to stop)")
+    print(f"[{role}] worker {pid}{' (ephemeral)' if ephemeral else ''} watching the board (ctrl-c to stop)")
 
-    while True:
-        if role == "team_lead":
-            scan_inbox()
-        task = board.claim_next(role, agent_name)
-        if task is None:
-            time.sleep(POLL_SECONDS)
-            continue
-
-        flow(f"[{role}] CLAIMED {task['id']} (chain {task['chain_id']}, round {task['iteration']}): "
-             f"{task['title']}  [workdir: {task.get('project_dir') or 'workspace/'}]")
-        try:
-            prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "")
-            res = await run_agent(
-                cfgs[role], prompt, task.get("project_dir"),
-                meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"]},
-            )
-            record_usage(task, role, res)
-            if res.get("is_error") or res.get("subtype") not in (None, "success"):
-                board.fail(task["id"], res.get("text", ""), res.get("structured"))
-                board.park_chain(task["chain_id"], f"{role} run ended with {res.get('subtype')}")
-                flow(f"[{role}] FAILED {task['id']} — subtype={res.get('subtype')}: {res.get('text', '')[:160]}")
+    try:
+        while True:
+            if role == "team_lead":
+                scan_inbox()
+            cfgs = configs()                    # roles-as-data: a new agents/*.yaml is picked up live
+            task = board.claim_next(role, agent_name)
+            board.worker_heartbeat(pid, role, ephemeral, task["id"] if task else None)
+            if task is None:
+                if ephemeral and time.time() - idle_since > idle_exit_s:
+                    flow(f"[{role}] ephemeral worker {pid} idle for {idle_exit_s}s — exiting")
+                    break
+                time.sleep(POLL_SECONDS)
                 continue
-            board.complete(task["id"], res.get("text", ""), res.get("structured"))
-            outcome = handoff(role, task, res)
-            denied = f"  (denied tools: {sorted(set(res['denied']))})" if res.get("denied") else ""
-            flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — {outcome}{denied}")
-        except Exception as e:
-            err = traceback.format_exc()
-            board.fail(task["id"], err[-2000:])
-            flow(f"[{role}] FAILED {task['id']} — {e}")
-            print(err)
+            idle_since = time.time()
+
+            flow(f"[{role}] CLAIMED {task['id']} (chain {task['chain_id']}, round {task['iteration']}): "
+                 f"{task['title']}  [workdir: {task.get('project_dir') or 'workspace/'}]")
+            try:
+                prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "")
+                res = await run_agent(
+                    cfgs[role], prompt, task.get("project_dir"),
+                    meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"]},
+                )
+                record_usage(task, role, res)
+                if res.get("is_error") or res.get("subtype") not in (None, "success"):
+                    board.fail(task["id"], res.get("text", ""), res.get("structured"))
+                    board.park_chain(task["chain_id"], f"{role} run ended with {res.get('subtype')}")
+                    flow(f"[{role}] FAILED {task['id']} — subtype={res.get('subtype')}: {res.get('text', '')[:160]}")
+                    continue
+                board.complete(task["id"], res.get("text", ""), res.get("structured"))
+                outcome = handoff(role, task, res)
+                denied = f"  (denied tools: {sorted(set(res['denied']))})" if res.get("denied") else ""
+                flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — {outcome}{denied}")
+            except Exception as e:
+                err = traceback.format_exc()
+                board.fail(task["id"], err[-2000:])
+                flow(f"[{role}] FAILED {task['id']} — {e}")
+                print(err)
+    finally:
+        board.worker_gone(pid)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        sys.exit(f"usage: python daemon.py <{'|'.join(configs())}>")
-    asyncio.run(main(sys.argv[1]))
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("role", help=f"one of: {', '.join(configs())}")
+    ap.add_argument("--ephemeral", action="store_true", help="exit when idle (used by supervisor.py)")
+    ap.add_argument("--idle-exit", type=int, default=90, help="seconds of idleness before an ephemeral worker exits")
+    a = ap.parse_args()
+    asyncio.run(main(a.role, ephemeral=a.ephemeral, idle_exit_s=a.idle_exit))

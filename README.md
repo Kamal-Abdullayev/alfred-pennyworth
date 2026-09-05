@@ -44,7 +44,7 @@ unset ANTHROPIC_API_KEY      # runner.py refuses to start if this is set
 
 ```bash
 (cd ui && npm install && npm run build)   # once, and after UI changes
-./run_all.sh                 # team_lead + developer + qa daemons + API/UI on :8787
+./run_all.sh                 # supervisor (spawns role workers) + API/UI on :8787
 python seed_task.py "Add rate limiting to /charge" --project ~/Desktop/projects/payment-service
 python monitor.py            # live board
 tail -f logs/flow.log        # every claim, finish and handover
@@ -127,9 +127,22 @@ list-price estimate from `pricing.py` — the only pricing arithmetic in Alfred 
 chain page shows which turn or tool call was expensive. The Usage page shows cost per
 request (chain), per day/role/model.
 
+## Workers and scaling
+
+`supervisor.py` runs the workers. Each role's YAML declares `workers: {min, max}`:
+*min* permanent workers are kept alive; while a role's queue is longer than its
+live workers, ephemeral workers are spawned up to *max* (they exit after 90 s idle).
+A global cap (`settings.max_workers`, default 4, editable on the Agents page)
+bounds the total, because the Team seat shares one rate limit. The lead's plan
+drives the queue: N subtasks → N developer tasks → up to N developers; a subtask
+may name a `role` (any `agents/*.yaml`) to route it to a specialist.
+
+The Agents page edits the YAML (model, contract, prompt, tools, allow rules,
+limits, workers, account connectors) and shows live workers with what each is
+doing. Changes apply to that role's next run — no restart.
+
 ## Adding a role
 
-Create `agents/<role>.yaml` with `name`, `model`, `contract`, `system_prompt`,
-`builtin_tools`, `allowed_tools`, optional `mcp_servers`, and start
-`python daemon.py <role>`. Add a contract to `contracts.py` if the role needs a
+Use **Add a role** on the Agents page (clones an existing role) or create
+`agents/<role>.yaml` by hand. The supervisor picks it up without a restart. Add a contract to `contracts.py` if the role needs a
 new output shape; reuse `review` for any reviewer-type role.

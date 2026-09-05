@@ -60,6 +60,7 @@ mcp_servers:
     args:
       - "${PROJECT_ROOT}/mcp_servers/gitlab/server.py"
 account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
+workers: { min: 1, max: 1 }   # one lead; it plans, it does not scale
 permission_mode: default
 max_minutes: 15
 logging:

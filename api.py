@@ -20,6 +20,7 @@ from pydantic import BaseModel
 
 import board
 import connectors as conn
+import contracts as contracts_module
 import daemon
 import vault
 
@@ -143,9 +144,145 @@ def health():
     return {"ok": True, "db": str(board.DB_PATH), "roles": list(daemon.configs())}
 
 
+BUILTIN_TOOLS = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "NotebookEdit", "TodoWrite"]
+MODELS = ["opus", "sonnet", "haiku", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001"]
+PERMISSION_MODES = ["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk"]
+
+
+class _Literal(str):
+    """Marks strings that should be dumped as YAML block literals (the system prompt)."""
+
+
+def _literal_representer(dumper, data):
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style="|")
+
+
+yaml.add_representer(_Literal, _literal_representer, Dumper=yaml.SafeDumper)
+
+
+def _agent_full(role: str) -> dict:
+    path = daemon.configs().get(role)
+    if not path:
+        raise HTTPException(404, f"no role {role}")
+    cfg = yaml.safe_load(open(ROOT / path)) or {}
+    return {"role": role, "path": path, **cfg}
+
+
+def _write_agent(role: str, cfg: dict) -> None:
+    """Write agents/<role>.yaml. Comments are not preserved — the UI is the editor now."""
+    out = dict(cfg)
+    out["name"] = role
+    if isinstance(out.get("system_prompt"), str):
+        out["system_prompt"] = _Literal(out["system_prompt"].rstrip("\n") + "\n")
+    (ROOT / "agents" / f"{role}.yaml").write_text(
+        yaml.safe_dump(out, sort_keys=False, allow_unicode=True, width=1000), encoding="utf-8")
+
+
 @app.get("/api/agents")
 def agents():
-    return _agents()
+    out = []
+    for a in _agents():
+        cfg = _agent_full(a["role"])
+        out.append({**a, "account_connectors": bool(cfg.get("account_connectors")),
+                    "workers": {"min": int((cfg.get("workers") or {}).get("min", 1)), "max": int((cfg.get("workers") or {}).get("max", 1))},
+                    "logging": cfg.get("logging") or {}, "raw": cfg})
+    return {"agents": out, "options": {"models": MODELS, "contracts": list(contracts_module.CONTRACTS), "builtin_tools": BUILTIN_TOOLS,
+                                       "permission_modes": PERMISSION_MODES}}
+
+
+class AgentIn(BaseModel):
+    model: str
+    contract: str
+    system_prompt: str
+    builtin_tools: list[str] = []
+    allowed_tools: list[str] = []
+    permission_mode: str = "default"
+    max_minutes: int = 15
+    max_turns: int | None = None
+    account_connectors: bool = False
+    workers: dict = {"min": 1, "max": 1}
+    mcp_servers: dict | None = None      # inline YAML servers; None = keep what the file has
+
+
+@app.put("/api/agents/{role}")
+def agent_update(role: str, a: AgentIn):
+    cur = _agent_full(role)
+    if a.contract not in contracts_module.CONTRACTS:
+        raise HTTPException(400, f"unknown contract {a.contract}; choose from {list(contracts_module.CONTRACTS)}")
+    if a.permission_mode not in PERMISSION_MODES:
+        raise HTTPException(400, f"unknown permission_mode {a.permission_mode}")
+    bad = [t for t in a.builtin_tools if t not in BUILTIN_TOOLS]
+    if bad:
+        raise HTTPException(400, f"unknown built-in tools {bad}")
+    wmin, wmax = int(a.workers.get("min", 1)), int(a.workers.get("max", 1))
+    if wmin < 0 or wmax < max(wmin, 1):
+        raise HTTPException(400, "workers.max must be >= workers.min >= 0")
+    cfg = {k: v for k, v in cur.items() if k not in ("role", "path")}
+    cfg.update({"model": a.model, "contract": a.contract, "system_prompt": a.system_prompt,
+                "builtin_tools": a.builtin_tools, "allowed_tools": a.allowed_tools,
+                "permission_mode": a.permission_mode, "max_minutes": a.max_minutes,
+                "account_connectors": a.account_connectors, "workers": {"min": wmin, "max": wmax}})
+    if a.max_turns:
+        cfg["max_turns"] = a.max_turns
+    else:
+        cfg.pop("max_turns", None)
+    if a.mcp_servers is not None:
+        cfg["mcp_servers"] = a.mcp_servers
+    cfg.setdefault("logging", {"level": "debug", "log_thinking": True, "log_tool_io": True})
+    _write_agent(role, cfg)
+    return _agent_full(role)
+
+
+class NewAgentIn(BaseModel):
+    role: str
+    clone_from: str = "developer"
+
+
+@app.post("/api/agents")
+def agent_create(n: NewAgentIn):
+    role = n.role.strip()
+    if not re_name.match(role) or role in ("tasks", "flow"):
+        raise HTTPException(400, "role must be letters, digits, - or _")
+    if role in daemon.configs():
+        raise HTTPException(409, f"role {role} already exists")
+    src = _agent_full(n.clone_from)
+    cfg = {k: v for k, v in src.items() if k not in ("role", "path")}
+    cfg["workers"] = {"min": 0, "max": 1}     # a new specialist starts off; the supervisor spawns it on demand
+    _write_agent(role, cfg)
+    return _agent_full(role)
+
+
+@app.delete("/api/agents/{role}")
+def agent_delete(role: str):
+    if role in ("team_lead", "developer", "qa"):
+        raise HTTPException(400, "the three core roles cannot be deleted; disable them by setting workers to 0/0")
+    path = daemon.configs().get(role)
+    if not path:
+        raise HTTPException(404, f"no role {role}")
+    (ROOT / path).unlink()
+    board.set_connector_roles  # noqa: B018 — connectors keep their assignment rows; harmless
+    return {"deleted": role}
+
+
+@app.get("/api/workers")
+def workers_view():
+    live = board.workers()
+    tasks_by_id = {t["id"]: t for t in board.snapshot() if t["status"] == "claimed"}
+    for w in live:
+        t = tasks_by_id.get(w.get("current_task") or "")
+        w["current_title"] = t["title"] if t else None
+        w["current_chain"] = t["chain_id"] if t else None
+    return {"workers": live, "open": board.open_count_by_role(),
+            "max_workers": int(board.get_setting("max_workers", 4))}
+
+
+@app.put("/api/settings/max_workers")
+def set_max_workers(body: dict):
+    n = int(body.get("max_workers", 4))
+    if not 1 <= n <= 16:
+        raise HTTPException(400, "max_workers must be between 1 and 16")
+    board.set_setting("max_workers", n)
+    return {"max_workers": n}
 
 
 @app.get("/api/tasks")

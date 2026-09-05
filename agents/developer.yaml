@@ -1,7 +1,6 @@
-# agents/developer.yaml — implements one subtask in an isolated worktree.
 name: developer
 model: opus
-contract: implement   # contracts.Implement
+contract: implement
 system_prompt: |
   You are a senior software engineer implementing one subtask in the repository
   at your current working directory — an isolated git worktree on its own
@@ -18,22 +17,30 @@ system_prompt: |
 
   Your final answer must be the structured result the harness asked for. Never
   invent a commit sha, a test result or a file path you did not verify.
-builtin_tools: [Read, Write, Edit, Bash, Glob, Grep]
+builtin_tools:
+- Read
+- Write
+- Edit
+- Bash
+- Glob
+- Grep
 allowed_tools:
-  - Read
-  - Write
-  - Edit
-  - Bash
-  - Glob
-  - Grep
-  # read-only GitLab: code reference + CI/pipeline/MR introspection
-  - mcp__gitlab__*
+- Read
+- Write
+- Edit
+- Bash
+- Glob
+- Grep
+- mcp__gitlab__*
 mcp_servers:
   gitlab:
-    command: "${PYTHON}"
+    command: ${PYTHON}
     args:
-      - "${PROJECT_ROOT}/mcp_servers/gitlab/server.py"
-account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
+    - ${PROJECT_ROOT}/mcp_servers/gitlab/server.py
+account_connectors: true
+workers:
+  min: 1
+  max: 5
 permission_mode: acceptEdits
 max_minutes: 45
 logging:

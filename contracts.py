@@ -16,6 +16,7 @@ class Subtask(BaseModel):
     description: str = Field(description="Self-contained instructions for one developer")
     acceptance: list[str] = Field(description="Numbered, testable acceptance criteria")
     depends_on: list[str] = Field(description="ids of subtasks that must finish first; [] if none")
+    role: str | None = Field(description="Role that should do this subtask (must be an existing agent role, e.g. developer or a specialist); null = developer")
 
 
 class Plan(BaseModel):

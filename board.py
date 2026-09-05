@@ -150,6 +150,19 @@ CREATE TABLE IF NOT EXISTS connector_log (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_connector_log ON connector_log(connector, id);
+CREATE TABLE IF NOT EXISTS workers (
+    pid          INTEGER PRIMARY KEY,
+    role         TEXT NOT NULL,
+    ephemeral    INTEGER NOT NULL DEFAULT 0,  -- 1 = spawned by the supervisor on demand; exits when idle
+    started_at   REAL NOT NULL,
+    last_seen    REAL NOT NULL,
+    current_task TEXT,
+    host         TEXT
+);
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS connector_roles (
     connector TEXT NOT NULL,
     role      TEXT NOT NULL,
@@ -318,6 +331,46 @@ def snapshot():
     with connect() as con:
         rows = con.execute("SELECT * FROM tasks ORDER BY created_at DESC").fetchall()
         return [dict(r) for r in rows]
+
+
+# ---------------------------------------------------------------- workers ----
+
+def worker_heartbeat(pid, role, ephemeral, current_task=None):
+    import socket
+    with connect() as con:
+        con.execute(
+            "INSERT INTO workers (pid, role, ephemeral, started_at, last_seen, current_task, host) VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(pid) DO UPDATE SET last_seen=excluded.last_seen, current_task=excluded.current_task",
+            (pid, role, int(ephemeral), time.time(), time.time(), current_task, socket.gethostname()))
+
+
+def worker_gone(pid):
+    with connect() as con:
+        con.execute("DELETE FROM workers WHERE pid=?", (pid,))
+
+
+def workers(stale_after=60):
+    """Live workers: heartbeat within stale_after seconds. Stale rows are removed."""
+    with connect() as con:
+        con.execute("DELETE FROM workers WHERE last_seen < ?", (time.time() - stale_after,))
+        return [dict(r) for r in con.execute("SELECT * FROM workers ORDER BY role, started_at")]
+
+
+def open_count_by_role():
+    with connect() as con:
+        return {r["role"]: r["n"] for r in con.execute("SELECT role, COUNT(*) n FROM tasks WHERE status='open' GROUP BY role")}
+
+
+def get_setting(key, default=None):
+    with connect() as con:
+        r = con.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return json.loads(r["value"]) if r else default
+
+
+def set_setting(key, value):
+    with connect() as con:
+        con.execute("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, json.dumps(value)))
 
 
 # -------------------------------------------------------- conversations ----
