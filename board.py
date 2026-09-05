@@ -37,7 +37,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     role        TEXT NOT NULL,          -- who should pick this up (agents/<role>.yaml)
     title       TEXT NOT NULL,
     body        TEXT NOT NULL,          -- full instructions for the agent
-    status      TEXT NOT NULL DEFAULT 'open',  -- open | claimed | done | failed | stuck
+    status      TEXT NOT NULL DEFAULT 'open',  -- open | claimed | done | failed | stuck | closed
     result      TEXT,                   -- agent's final text
     structured  TEXT,                   -- agent's validated contract output (JSON)
     project_dir TEXT,                   -- absolute path the agent works in
@@ -267,13 +267,60 @@ def _finish(task_id, status, result, structured):
 
 
 def park_chain(chain_id, reason):
-    """Mark a whole chain as stuck. Nothing will pick it up again."""
+    """Park a chain: queued tasks become 'stuck' so nobody picks them up. Tasks that are
+    already running are left alone — they finish, record their cost and result, and the
+    daemon skips their hand-off because chain_is_parked() is true."""
     with connect() as con:
         con.execute(
             "UPDATE tasks SET status='stuck', result=COALESCE(result,'') || ' | parked: ' || ? "
-            "WHERE chain_id=? AND status IN ('open','claimed')",
+            "WHERE chain_id=? AND status='open'",
             (reason, chain_id),
         )
+        # if nothing was queued, still leave a marker so the chain reads as parked
+        n = con.execute("SELECT COUNT(*) c FROM tasks WHERE chain_id=? AND status='stuck'", (chain_id,)).fetchone()["c"]
+        if n == 0:
+            root = con.execute("SELECT id FROM tasks WHERE chain_id=? ORDER BY created_at LIMIT 1", (chain_id,)).fetchone()
+            if root:
+                con.execute("UPDATE tasks SET result=COALESCE(result,'') || ' | parked: ' || ? WHERE id=?", (reason, root["id"]))
+                con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"parked:{chain_id}", json.dumps(reason)))
+
+
+def requeue_chain(chain_id):
+    """Human action: stuck tasks become claimable again; the parked marker is cleared."""
+    with connect() as con:
+        n = con.execute("UPDATE tasks SET status='open', claimed_by=NULL, claimed_at=NULL, "
+                        "result=REPLACE(COALESCE(result,''), ' | parked: ', ' | was parked: ') "
+                        "WHERE chain_id=? AND status='stuck'", (chain_id,)).rowcount
+        con.execute("DELETE FROM settings WHERE key=?", (f"parked:{chain_id}",))
+        return n
+
+
+def close_chain(chain_id, reason):
+    """Human action: the chain needs no more attention. Queued/stuck tasks are closed;
+    finished ones are untouched. Running tasks finish but hand nothing off."""
+    with connect() as con:
+        n = con.execute("UPDATE tasks SET status='closed', result=COALESCE(result,'') || ' | closed: ' || ? "
+                        "WHERE chain_id=? AND status IN ('open','stuck')", (reason, chain_id)).rowcount
+        con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (f"closed:{chain_id}", json.dumps(reason)))
+        con.execute("DELETE FROM settings WHERE key=?", (f"parked:{chain_id}",))
+        return n
+
+
+def chain_is_closed(chain_id):
+    with connect() as con:
+        return con.execute("SELECT 1 FROM settings WHERE key=?", (f"closed:{chain_id}",)).fetchone() is not None
+
+
+def set_task_project_dir(task_id, project_dir):
+    with connect() as con:
+        con.execute("UPDATE tasks SET project_dir=? WHERE id=?", (project_dir, task_id))
+
+
+def chain_is_parked(chain_id):
+    with connect() as con:
+        if con.execute("SELECT 1 FROM tasks WHERE chain_id=? AND status='stuck' LIMIT 1", (chain_id,)).fetchone():
+            return True
+        return con.execute("SELECT 1 FROM settings WHERE key IN (?, ?)", (f"parked:{chain_id}", f"closed:{chain_id}")).fetchone() is not None
 
 
 def chain_root(chain_id):

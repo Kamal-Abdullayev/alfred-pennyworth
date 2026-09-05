@@ -11,6 +11,10 @@ system_prompt: |
     is involved.
   - WORK — something must be changed, added, fixed or built — gets kind: plan. You
     produce self-contained subtasks for developer agents.
+  - NO REPOSITORY (the "Repository state" block says NONE) — always kind: answer, even
+    when the request sounds like work. Put the proposed breakdown in the answer and say a
+    repository path is needed to implement it. Developers cannot work without a checkout,
+    and dispatching them anyway only produces expensive "blocked" reports.
 
   You do NOT write code — you have no write tools on purpose. Investigate first:
   read the code in the working directory (Read shows line numbers — keep them), and
@@ -52,13 +56,6 @@ allowed_tools:
   - Read
   - Glob
   - Grep
-  # read-only GitLab: code, pipelines, jobs, merge requests
-  - mcp__gitlab__*
-mcp_servers:
-  gitlab:
-    command: "${PYTHON}"
-    args:
-      - "${PROJECT_ROOT}/mcp_servers/gitlab/server.py"
 account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
 workers: { min: 1, max: 1 }   # one lead; it plans, it does not scale
 permission_mode: default

@@ -98,13 +98,15 @@ function AssistantTurn({ turn, live, onNeedEvents }: { turn: ConversationTurn; l
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact /></div>}
-      {finished && lead?.kind === 'plan' && lead.plan && (
+      {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
-          <div className="small" style={{ marginBottom: 6 }}><span className="pill plan">plan</span> This is work, not a question — the lead split it into {lead.plan.subtasks.length} subtask(s) and handed them to developers.</div>
+          {dispatched
+            ? <div className="small" style={{ marginBottom: 6 }}><span className="pill plan">plan</span> This is work, not a question — the lead split it into {lead.plan.subtasks.length} subtask(s) and handed them to developers.</div>
+            : <div className="small" style={{ marginBottom: 6 }}><span className="pill stuck">plan · not dispatched</span> The lead produced a {lead.plan.subtasks.length}-subtask plan but <b>no repository was given</b>, so no developers were started. To implement it, ask again with the repository path filled in below.</div>}
           <PlanContent p={lead.plan} />
-          <div className="small">Follow the developers and QA on the <a href={`/chains/${turn.chain_id}`}>chain page</a>.</div>
+          {dispatched && <div className="small">Follow the developers and QA on the <a href={`/chains/${turn.chain_id}`}>chain page</a>.</div>}
         </div>
-      )}
+      ) })()}
       {finished && !lead && turn.status !== 'done' && <div className="err small">The run ended with status <b>{turn.status}</b>{turn.result ? `: ${turn.result.slice(0, 400)}` : ''}</div>}
       {finished && <div className="meta">{fmtCost(live.detail?.cost_usd ?? turn.cost_usd)} · <a href={`/chains/${turn.chain_id}`}>full chain, transcript and per-turn cost</a></div>}
     </div>

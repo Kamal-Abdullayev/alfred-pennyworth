@@ -134,7 +134,11 @@ def repo_state(project_dir) -> str:
     """Appended to the team lead's prompt so it can fill Answer.source without a shell.
     Two clones of one repo on the same machine can differ by weeks — the lead must say which it read."""
     if not project_dir or not worktree.is_repo(project_dir):
-        return ""
+        return ("\n\n--- Repository state ---\n"
+                "NONE: no local repository was provided for this request. You may read code through the "
+                "GitLab tools, but there is nowhere for developers to work. Do NOT answer with kind: plan — "
+                "use kind: answer, include the proposed breakdown in the answer, and say that a repository "
+                "path is needed before anything can be implemented.\n")
     try:
         root = worktree.repo_root(project_dir)
         branch = worktree._git(root, "rev-parse", "--abbrev-ref", "HEAD")
@@ -173,8 +177,13 @@ def handoff(role, task, res) -> str:
             board.park_chain(chain, "team lead plan has no subtasks")
             return f"chain {chain} parked: empty plan"
 
-        # One isolated worktree per chain when the project is a git repo.
+        # Hard guard: developers need a repository. Without one, every developer would only be
+        # able to report "blocked" — at full price. Keep the plan, dispatch nothing.
         workdir = task.get("project_dir")
+        if not (workdir and worktree.is_repo(workdir)):
+            return (f"PLAN NOT DISPATCHED for chain {chain}: {len(plan['subtasks'])} subtask(s) produced but no git "
+                    f"repository was given — ask again with a repository path to implement it")
+        # One isolated worktree per chain when the project is a git repo.
         if workdir and worktree.is_repo(workdir):
             wt = worktree.create(workdir, chain)
             board.set_chain_worktree(chain, wt.path, wt.base_sha)
@@ -321,6 +330,10 @@ async def main(role, ephemeral=False, idle_exit_s=90):
                     flow(f"[{role}] FAILED {task['id']} — subtype={res.get('subtype')}: {res.get('text', '')[:160]}")
                     continue
                 board.complete(task["id"], res.get("text", ""), res.get("structured"))
+                if role != "team_lead" and board.chain_is_parked(task["chain_id"]):
+                    flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — chain {task['chain_id']} "
+                         f"is parked; result recorded, no hand-off")
+                    continue
                 outcome = handoff(role, task, res)
                 denied = f"  (denied tools: {sorted(set(res['denied']))})" if res.get("denied") else ""
                 flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — {outcome}{denied}")

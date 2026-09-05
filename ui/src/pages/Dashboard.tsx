@@ -20,7 +20,7 @@ export default function Dashboard() {
 
   const running = tasks.filter((t) => t.status === 'claimed')
   const queued = tasks.filter((t) => t.status === 'open')
-  const stuck = chains.filter((c) => c.status === 'stuck')
+  const stuck = chains.filter((c) => c.status === 'stuck' || c.status === 'not_dispatched' || c.status === 'failed')
   const cost = chains.reduce((s, c) => s + (c.cost_usd || 0), 0)
 
   return (
@@ -29,7 +29,7 @@ export default function Dashboard() {
       <div className="grid cols-4">
         <div className="card stat"><div className="v">{running.length}</div><div className="l">agents working now</div></div>
         <div className="card stat"><div className="v">{queued.length}</div><div className="l">tasks queued</div></div>
-        <div className="card stat"><div className="v" style={{ color: stuck.length ? 'var(--warn)' : undefined }}>{stuck.length}</div><div className="l">chains need a human</div></div>
+        <div className="card stat"><div className="v" style={{ color: stuck.length ? 'var(--warn)' : undefined }}>{stuck.length}</div><div className="l">chains need a human{stuck.length ? <> — <a href={`/chains/${stuck[0]!.chain_id}`} onClick={(e) => { e.preventDefault(); nav(`/chains/${stuck[0]!.chain_id}`) }}>open</a></> : ''}</div></div>
         <div className="card stat"><div className="v">{fmtCost(cost)}</div><div className="l">all chains, list-price estimate</div></div>
       </div>
 
