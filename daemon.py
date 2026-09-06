@@ -31,8 +31,6 @@ POLL_SECONDS = 10
 
 ROOT = Path(__file__).parent
 AGENTS_DIR = ROOT / "agents"
-INBOX = ROOT / "inbox"
-PROCESSED = INBOX / "processed"
 
 
 def configs() -> dict[str, str]:
@@ -49,43 +47,6 @@ def flow(msg):
         f.write(line + "\n")
     print(line)
 
-
-def scan_inbox():
-    """Turn .md/.txt files dropped into inbox/ into team_lead tasks.
-
-    File format: optional `project: /path/to/repo` first line, then the job.
-    Processed files are moved (not deleted) to inbox/processed/.
-    """
-    INBOX.mkdir(exist_ok=True)
-    PROCESSED.mkdir(exist_ok=True)
-    for f in sorted(INBOX.glob("*.md")) + sorted(INBOX.glob("*.txt")):
-        text = f.read_text(encoding="utf-8").strip()
-        if not text:
-            continue
-        project_dir = None
-        lines = text.splitlines()
-        if lines and lines[0].strip().lower().startswith("project:"):
-            candidate = Path(lines[0].split(":", 1)[1].strip()).expanduser()
-            if not candidate.is_dir():
-                print(f"[inbox] {f.name}: project dir not found: {candidate} — skipping file")
-                continue
-            project_dir = str(candidate.resolve())
-            lines = lines[1:]
-        body = "\n".join(lines).strip()
-        if not body:
-            continue
-        task_id = board.create_task(
-            role="team_lead",
-            title=f.stem.replace("_", " ").replace("-", " ")[:60],
-            body=body,
-            created_by=f"inbox:{f.name}",
-            project_dir=project_dir,
-        )
-        f.rename(PROCESSED / f"{time.strftime('%Y%m%d-%H%M%S')}_{f.name}")
-        flow(f"[inbox] NEW JOB {task_id} from file {f.name} [workdir: {project_dir or 'workspace/'}]")
-
-
-# ------------------------------------------------------------- prompts ----
 
 def developer_body(job: str, subtask: dict) -> str:
     acceptance = "\n".join(f"  {i + 1}. {a}" for i, a in enumerate(subtask.get("acceptance", [])))
@@ -327,14 +288,10 @@ async def main(role, ephemeral=False, idle_exit_s=90):
     agent_name = f"{role}-{pid}"
     idle_since = time.time()
     board.worker_heartbeat(pid, role, ephemeral)
-    if role == "team_lead":
-        print(f"[{role}] also watching {INBOX}/ for .md/.txt job files")
     print(f"[{role}] worker {pid}{' (ephemeral)' if ephemeral else ''} watching the board (ctrl-c to stop)")
 
     try:
         while True:
-            if role == "team_lead":
-                scan_inbox()
             cfgs = configs()                    # roles-as-data: a new agents/*.yaml is picked up live
             task = board.claim_next(role, agent_name)
             board.worker_heartbeat(pid, role, ephemeral, task["id"] if task else None)

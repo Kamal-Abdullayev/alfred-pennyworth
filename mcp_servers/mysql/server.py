@@ -19,7 +19,7 @@ Environment variables:
                       and you pass `database=` per call (or fully-qualify in SQL)
   MYSQL_ALLOW_WRITES  set to 1/true to permit INSERT/UPDATE/DELETE/REPLACE
   MYSQL_ALLOW_DDL     set to 1/true to ALSO permit CREATE/DROP/ALTER/TRUNCATE
-  MYSQL_LOG_DIR       default /Users/kamal.abdullayev/Desktop/mcp-server-logs/
+  MYSQL_LOG_DIR       default <project>/logs/mcp/
 """
 import json
 import logging
@@ -40,7 +40,7 @@ PASSWORD = os.environ.get("MYSQL_PASSWORD")
 DEFAULT_DB = os.environ.get("MYSQL_DATABASE") or None
 ALLOW_WRITES = os.environ.get("MYSQL_ALLOW_WRITES", "").lower() in ("1", "true", "yes")
 ALLOW_DDL = os.environ.get("MYSQL_ALLOW_DDL", "").lower() in ("1", "true", "yes")
-LOG_DIR = os.environ.get("MYSQL_LOG_DIR", "/Users/kamal.abdullayev/Desktop/mcp-server-logs/")
+LOG_DIR = os.environ.get("MYSQL_LOG_DIR", str(__import__("pathlib").Path(__file__).resolve().parents[2] / "logs" / "mcp"))
 
 # Transport: "stdio" (Claude Desktop launches it) or "http" (you run it; Claude connects).
 MCP_TRANSPORT = os.environ.get("MCP_TRANSPORT", "stdio").lower()

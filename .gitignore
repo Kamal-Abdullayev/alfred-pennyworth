@@ -77,13 +77,10 @@ localsetup.yml
 /logs
 tasks.db
 tasks.db-*
-/inbox
 # Python
 __pycache__/
 *.pyc
 
-# Secrets — never commit the real .env (.env.example is the committed template)
-.env
 /worktrees
 /workspace
 /data/

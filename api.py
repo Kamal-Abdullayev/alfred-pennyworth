@@ -157,6 +157,14 @@ def _ui_version() -> str:
     return str(int(idx.stat().st_mtime)) if idx.is_file() else "dev"
 
 
+@app.get("/api/doctor")
+def doctor_report():
+    """Preflight checks (same as `python doctor.py --json`); the Dashboard shows failures."""
+    import doctor
+    checks = doctor.run_checks()
+    return {"ok": all(c["ok"] for c in checks if c["required"]), "checks": checks}
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "db": str(board.DB_PATH), "roles": list(daemon.configs()), "ui_version": _ui_version()}

@@ -70,14 +70,22 @@ TEMPLATES = {
         "note": "Community mcp-atlassian server (Python, via uvx — requires uv). Read tools only are allowed to agents by default.",
     },
     "jira-onprem": {
-        "label": "Jira Data Center — Bally's custom read-only server",
-        "kind": "stdio", "command": str(Path.home() / "Desktop/custom_mcps/onprem_jira_mcp/.venv/bin/python"),
-        "args": [str(Path.home() / "Desktop/custom_mcps/onprem_jira_mcp/server.py")],
+        "label": "Jira Data Center — custom read-only server",
+        "kind": "stdio", "command": PYTHON, "args": [str(ROOT / "mcp_servers/jira/server.py")],
         "env": {
             "JIRA_URL": {"secret": False, "default": None, "help": "e.g. https://jira.example.com"},
             "JIRA_TOKEN": {"secret": True, "default": None, "help": "Personal access token"},
         }, "headers": {},
-        "note": "The custom server in ~/Desktop/custom_mcps/onprem_jira_mcp.",
+        "note": "Bundled read-only server (mcp_servers/jira): issues, comments, JQL search, boards, sprints, epics.",
+    },
+    "excalidraw": {
+        "label": "Excalidraw — shared canvas the team lead draws on (Docker)",
+        "kind": "stdio", "command": "docker",
+        "args": ["run", "-i", "--rm", "-e", "EXPRESS_SERVER_URL=http://host.docker.internal:3000",
+                 "-e", "ENABLE_CANVAS_SYNC=true", "ghcr.io/yctimlin/mcp_excalidraw:latest"],
+        "env": {}, "headers": {},
+        "note": "Needs Docker and the canvas running: docker compose -f excalidraw/docker-compose.yml up -d (http://localhost:3000). "
+                "Assign to team_lead. export_to_excalidraw_url is always denied (it uploads to excalidraw.com).",
     },
     "gitlab-onprem": {
         "label": "GitLab (self-hosted) — read-only: code, pipelines, MRs",
@@ -86,7 +94,7 @@ TEMPLATES = {
             "GITLAB_URL": {"secret": False, "default": "https://gitlab.ballys.tech", "help": "Base URL"},
             "GITLAB_TOKEN": {"secret": True, "default": None, "help": "PAT with read_api scope"},
         }, "headers": {},
-        "note": "project_x/mcp_servers/gitlab — the server the agents already use via YAML.",
+        "note": "Bundled read-only server (mcp_servers/gitlab): files, tree, search, MRs, discussions, pipelines, jobs, logs, artifacts.",
     },
     "mysql": {
         "label": "MySQL (read-only user)",

@@ -146,6 +146,7 @@ export const api = {
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
   createJob: (body: string, project_dir?: string, conversation_id?: string) =>
     j<{ task_id: string | null; chain_id: string | null; conversation_id: string | null; remembered?: Memory }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
+  doctor: () => j<{ ok: boolean; checks: { name: string; ok: boolean; required: boolean; detail: string; fix: string | null }[] }>('/api/doctor'),
   memoryProjects: () => j<MemoryProject[]>('/api/memory/projects'),
   memoryKey: (project_dir: string) => j<{ project_key: string }>(`/api/memory/key?project_dir=${encodeURIComponent(project_dir)}`),
   memoryList: (p: { project_key?: string; status?: string; q?: string; chain_id?: string }) => {

@@ -1,0 +1,17 @@
+# Optional: the shared Excalidraw canvas the team lead draws on.
+#
+#   docker compose -f excalidraw/docker-compose.yml up -d     # canvas at http://localhost:3000
+#
+# Then add the "excalidraw" connector on the Connectors page (template: excalidraw). The
+# connector itself runs the MCP server per agent run with `docker run -i --rm …` and points
+# it at this canvas; nothing here needs to be edited.
+services:
+  canvas:
+    image: ghcr.io/yctimlin/mcp_excalidraw-canvas:latest
+    container_name: mcp-excalidraw-canvas
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      HOST: "0.0.0.0"
+    restart: unless-stopped

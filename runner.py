@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
-from dotenv import load_dotenv
 from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions,
     AssistantMessage, SystemMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage,
@@ -34,10 +33,6 @@ import pricing
 ROOT = Path(__file__).parent
 LOG_DIR = ROOT / "logs"
 WORKSPACE = ROOT / "workspace"   # sandbox for tasks with no project_dir
-
-# Load secrets (e.g. GITLAB_TOKEN) from .env into this process's environment.
-# MCP subprocesses inherit this environment, so tokens never live in the YAML.
-load_dotenv(ROOT / ".env", override=True)
 
 # SDK-internal tools that must never be gated: StructuredOutput carries the answer.
 ALWAYS_ALLOWED = {"StructuredOutput"}
