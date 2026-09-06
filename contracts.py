@@ -23,6 +23,9 @@ class Plan(BaseModel):
     summary: str
     subtasks: list[Subtask]
     parallelism: int = Field(description="How many subtasks may run at once; 1 if unsure")
+    repo_path: str | None = Field(description="Absolute path of the LOCAL git checkout developers must work in when the "
+                                              "Repository state block says NONE but you know it — a path the human wrote, "
+                                              "or a checkout you read with Read. null when a repository was attached or none exists locally.")
 
 
 class Verification(BaseModel):
@@ -40,8 +43,9 @@ class Blocked(BaseModel):
 class Implement(BaseModel):
     status: Literal["done", "blocked"]
     summary: str = Field(description="One paragraph: what you did, or why you are blocked")
-    branch: str | None = Field(description="Branch you committed to; null if blocked")
-    commit_sha: str | None = Field(description="Full sha of YOUR commit; never invent one; null if blocked")
+    branch: str | None = Field(description="Branch you worked on; null if blocked")
+    committed: bool = Field(description="true if you committed. false when the human asked for NO commits (task text or PROJECT MEMORY): changes are left uncommitted in the working tree")
+    commit_sha: str | None = Field(description="Full sha of YOUR commit; never invent one; null if blocked or not committed")
     files_changed: list[str]
     approach: str | None
     verification: Verification
@@ -110,11 +114,22 @@ class Answer(BaseModel):
     confidence: Literal["low", "medium", "high"]
 
 
+class MemoryProposal(BaseModel):
+    """A candidate entry for the shared project memory. The human accepts or rejects it in the UI."""
+    kind: Literal["decision", "fact", "convention", "glossary", "person", "question", "todo"]
+    title: str = Field(description="One line, specific: 'OTP completion goes through session-proxy, not ASS directly'")
+    body: str = Field(description="Self-contained: what, why, who decided, when — enough for an agent that has no other context")
+    tags: list[str] = Field(description="Lowercase keywords for search, e.g. ['2fa', 'session-proxy']; empty is fine")
+
+
 class LeadOutput(BaseModel):
     """The team lead decides what a request is. A question gets an answer; work gets a plan."""
     kind: Literal["plan", "answer"]
     plan: Plan | None = Field(description="Filled when kind is plan")
     answer: Answer | None = Field(description="Filled when kind is answer")
+    memory_proposals: list[MemoryProposal] = Field(
+        description="Decisions, constraints or facts the HUMAN stated in this request that are not derivable from the code "
+                    "and are not already in PROJECT MEMORY. Usually empty. Never restate what the code says.")
 
 
 CONTRACTS: dict[str, type[BaseModel]] = {

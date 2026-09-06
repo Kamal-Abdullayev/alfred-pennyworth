@@ -203,6 +203,7 @@ def init():
             ("conversation_id", "TEXT"),   # Ask-page chat this chain belongs to
             ("question", "TEXT"),          # the human's raw question (body may carry injected context)
             ("stop_requested", "INTEGER NOT NULL DEFAULT 0"),  # human pressed Stop while it was running
+            ("project_key", "TEXT"),       # memory key (git remote) when the task has no project_dir
         ):
             if name not in cols:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
@@ -216,15 +217,15 @@ def init():
 # ---------------------------------------------------------------- tasks ----
 
 def create_task(role, title, body, created_by, chain_id=None, iteration=1,
-                project_dir=None, parent_id=None, conversation_id=None, question=None):
+                project_dir=None, parent_id=None, conversation_id=None, question=None, project_key=None):
     task_id = str(uuid.uuid4())[:8]
     chain_id = chain_id or task_id
     with connect() as con:
         con.execute(
             "INSERT INTO tasks (id, chain_id, parent_id, role, title, body, iteration, "
-            "created_by, created_at, project_dir, conversation_id, question) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_by, created_at, project_dir, conversation_id, question, project_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (task_id, chain_id, parent_id, role, title, body, iteration, created_by,
-             time.time(), project_dir, conversation_id, question),
+             time.time(), project_dir, conversation_id, question, project_key),
         )
         if conversation_id:
             con.execute("UPDATE conversations SET updated_at=? WHERE id=?", (time.time(), conversation_id))
@@ -472,6 +473,12 @@ def create_conversation(title, project_dir=None):
         con.execute("INSERT INTO conversations (id, title, project_dir, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
                     (cid, title[:120], project_dir, time.time(), time.time()))
     return cid
+
+
+def set_conversation_project_dir(cid, project_dir):
+    with connect() as con:
+        con.execute("UPDATE conversations SET project_dir=?, updated_at=? WHERE id=? AND (project_dir IS NULL OR project_dir='')",
+                    (project_dir, time.time(), cid))
 
 
 def get_conversation(cid):

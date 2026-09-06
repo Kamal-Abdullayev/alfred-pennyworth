@@ -200,6 +200,25 @@ function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: 
         ))}
       </div>
 
+      {(d.notes?.length > 0 || d.memories?.length > 0) && (
+        <>
+          <h2>Team notes & memory</h2>
+          <div className="card">
+            {d.notes?.length > 0 && (
+              <div style={{ marginBottom: d.memories?.length ? 12 : 0 }}>
+                <div className="muted small" style={{ marginBottom: 4 }}>progress notes the agents left for each other</div>
+                {d.notes.map((n) => <div key={n.id} className="small" style={{ display: 'flex', gap: 8 }}><span className="mono muted">{new Date(n.created_at * 1000).toLocaleTimeString()}</span><span className={`pill ${n.role}`}>{n.role}</span><span>{n.note}</span></div>)}
+              </div>
+            )}
+            {d.memories?.length > 0 && (
+              <div>
+                <div className="muted small" style={{ marginBottom: 4 }}>memory entries this run proposed — <a href={`/memory?project=${encodeURIComponent(d.memories[0].project_key)}&status=proposed`}>review on the Memory page</a></div>
+                {d.memories.map((m) => <div key={m.id} className="small" style={{ display: 'flex', gap: 8, alignItems: 'baseline' }}><span className={`pill ${m.kind}`}>{m.kind}</span><span className={`pill ${m.status}`}>{m.status}</span><b>{m.title}</b><span className="muted">{m.body.slice(0, 160)}{m.body.length > 160 ? '…' : ''}</span></div>)}
+              </div>
+            )}
+          </div>
+        </>
+      )}
       <h2>Findings ({d.findings.length})</h2>
       <p className="muted small" style={{ marginTop: -4 }}>Review comments on the change — from QA, from you, later from CI and merge-request reviewers. Open findings drive the next fix round.</p>
       <div className="card" style={{ padding: 0 }}>
@@ -241,7 +260,13 @@ function ImplementView({ d, id, reload }: { d: ChainDetail; id: string; reload: 
         </div>
       </div>
 
-      <h2>Diff {d.log && <span className="muted small mono">{d.log.trim().split('\n').length} commit(s)</span>}</h2>
+      <h2>Diff {d.log?.trim() ? <span className="muted small mono">{d.log.trim().split('\n').length} commit(s) on {d.branch}</span> : d.diff ? <span className="muted small">uncommitted, in the worktree</span> : null}</h2>
+      {d.diff && root.worktree && (
+        <div className="muted small" style={{ marginBottom: 8 }}>
+          Your checkout is untouched. The change lives in <span className="mono">{root.worktree}</span>{d.log?.trim() ? ` on branch ${d.branch}` : ' as uncommitted edits'}. To take it into your checkout without committing:
+          <pre className="log" style={{ marginTop: 4 }}>{`git -C ${root.worktree} diff ${root.base_sha?.slice(0, 12) ?? ''} | git -C ${root.project_dir ?? '<your checkout>'} apply`}</pre>
+        </div>
+      )}
       {d.log && <pre className="log" style={{ marginBottom: 10 }}>{d.log}</pre>}
       {d.diff ? <Diff text={d.diff} /> : <div className="card muted">No diff available — the repo, base sha or branch is missing (sandbox run, or the worktree was removed).</div>}
 

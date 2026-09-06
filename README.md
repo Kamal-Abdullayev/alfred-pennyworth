@@ -1,148 +1,145 @@
-# Alfred — local multi-agent engineering team
+# Alfred — a local multi-agent engineering team
 
-Three agent roles on one Claude Team seat, coordinating through a shared SQLite
-board. No central orchestrator process: each daemon watches the board, does its
-part, and creates the next role's task. The team lead is the human's only
-contact.
+Three agent roles on one Claude **Team seat** (never an API key), coordinating through a
+shared SQLite board: a **team lead** that is your only contact and decides whether a
+request is a question (it answers) or work (it plans), **developers** that implement in
+private git worktrees, and **QA** that reviews the diff and runs the tests. Everything is
+driven from a local web UI: chat, live agent activity, cost per turn, connectors to
+Jira/Confluence/GitLab/DBs, agent configuration, shared project memory, and a shared
+Excalidraw canvas.
+
+Nothing is pushed by agents. Nothing leaves your laptop except the model calls your Claude
+login makes and the read-only connector calls you configure.
+
+## Quick start (fresh clone)
+
+Prerequisites: macOS or Linux, **Python 3.11+**, **Node 20+**, **git**, a **Claude Team (or
+Max) login**. Optional: Docker (shared canvas), IntelliJ (click-to-open code links).
+
+```bash
+git clone <this repo> alfred && cd alfred
+./setup.sh                 # venv, Python deps, UI build, preflight report
+claude                     # first time only: /login with your Team account, then exit
+./run_all.sh               # workers + API/UI → http://127.0.0.1:8787
+```
+
+`setup.sh` ends with a preflight table (`python doctor.py` any time). `run_all.sh` refuses to
+start while a required check fails, and the Dashboard shows the same problems with the fix
+for each. Do **not** set `ANTHROPIC_API_KEY` — the runner refuses to start if it is set,
+because it would bill API rates instead of your seat.
+
+Then, in the UI:
+
+1. **Connectors** → add what your agents may read. Three ways:
+   - **Discover account connectors**: the MCP servers your claude.ai account already has
+     (Atlassian, Microsoft 365, …) — no configuration, just tick the roles.
+   - **Add from template**: Jira Data Center, Confluence, self-hosted GitLab, MySQL, the
+     Excalidraw canvas, or any custom stdio/HTTP server. Secrets go to the macOS Keychain
+     (a 0600 file on other systems), never to the database or logs.
+   - **Import** servers already registered for Claude Desktop / Claude Code.
+   Press **Test** on each: it lists the tools and classifies them read/mutates. Agents get
+   only the read tools unless you mark the connector "writes are safe".
+2. **Ask** → talk to the team lead. Give a local repository path (or mention it in the
+   message) when the question is about local code or you want changes applied.
+3. **Agents** → models, prompts, tools, worker counts per role. Changes apply to the next run.
+
+## What you can do
+
+| Page | What it is |
+|---|---|
+| **Ask** | Chat with the team lead. Live steps while it works, then the answer with verbatim code refs (open in IntelliJ / GitLab), Mermaid diagrams, citations, confidence, per-turn cost. **■ stop** interrupts a running turn. `remember: …` stores a fact in project memory, `remember globally: …` for all projects. Proposed memory entries can be accepted right in the chat. |
+| **Dashboard** | Live board, every chain with status and cost, flow log, setup problems. |
+| **Chain page** | Plan → implementation → QA verdict timeline, findings, the full diff (committed or not), transcripts, per-turn tokens, human actions (requeue, close, dispatch, stop, send a finding back). |
+| **Memory** | Shared project memory: decisions, facts, conventions, glossary, people, open questions — per repository (keyed by git remote, so two clones share it) plus global. Agents and meeting-notes intakes can only **propose**; you accept, edit, retire. **Paste meeting notes** → the lead distils them into proposals. Exported as Markdown under `data/memory/`. |
+| **Agents** | Edit each role's YAML from the UI; add roles by cloning; see live workers and the global cap. |
+| **Usage** | Cost per request, per day/role/model (list-price estimates — a consumption meter on a seat, not a bill). |
+| **Connectors** | MCP servers as data, with a masked log per connector. |
+| **Logs** | Per-agent readable logs. |
+
+### How a request flows
+
+1. **team_lead** reads the request plus two injected blocks: **PROJECT MEMORY** (active
+   entries for that repository + global) and **BOARD** (what other agents are doing right
+   now). A question → `kind: answer`. Work → `kind: plan` with self-contained subtasks.
+   No repository → it answers with the plan and asks for a path (unless it can name the
+   local checkout it read, in which case the harness attaches it).
+2. A git worktree is created at `worktrees/<chain>` on branch `alfred/<chain>`; one
+   **developer** task per subtask. Developers commit on that branch by default. If the task
+   or project memory says you do not want commits, they leave the changes uncommitted
+   (**no-commit mode**); either way your own checkout is never touched.
+3. **qa** reads the diff (commits or working tree), runs the tests, probes edge cases, and
+   returns a verdict with typed findings. Fail → a fix round (max 3), then the chain parks
+   as *stuck* for you.
+4. You review the diff on the chain page and merge, apply, or discard. The chain page shows
+   the exact `git … diff | git … apply` command for taking the change into your checkout.
+
+Every agent ends with structured output validated against its contract
+(`contracts.py`). Tools outside a role's allowlist are denied in a hook. Roles run with
+`setting_sources=[]` (nothing from `~/.claude` leaks in) unless they use your account's
+connectors (`account_connectors: true`). Agents can never push, and mutating connector
+tools are denied unless you trust a connector's writes.
 
 ## Layout
 
 ```
-agents/           one YAML per role (model, prompt, tools, contract, limits) — add a file, get a role
-contracts.py      typed handoff contracts (Pydantic) — plan / implement / review / answer
-board.py          SQLite board: tasks, findings, usage (atomic claims, lease timeout, round cap)
-runner.py         runs one agent on one task via the Agent SDK; enforces tool allowlist + structured output
-daemon.py         role loop: claim -> run -> typed handoff
-worktree.py       one git worktree per chain; agents never touch your checked-out branch
-api.py            FastAPI + SSE over the board; serves the built UI at http://127.0.0.1:8787
-connectors.py     MCP connectors as data: templates, Keychain-backed config, live test + tool classification
-vault.py          macOS Keychain wrapper for connector secrets
-pricing.py        list-price table for per-turn cost estimates
-ui/               React (Vite) frontend: dashboard, chain timeline + diff + human review, usage, agents, connectors
-seed_task.py      drop a new job on the board (CLI alternative to the UI's Ask page)
-monitor.py        terminal board view
-mcp_servers/      Python MCP servers (GitLab read-only, MySQL)
-logs/             per-agent JSONL + human logs, plus flow.log with every handover
-worktrees/        chain worktrees (created on demand)
-tasks.db          the board (created on first run)
+setup.sh / doctor.py   one-time setup and preflight (also /api/doctor → Dashboard banner)
+run_all.sh             preflight, build UI if needed, start supervisor + API on :8787
+agents/                one YAML per role (model, prompt, tools, contract, workers)
+contracts.py           typed handoff contracts (lead / plan / implement / review / answer / memory proposals)
+board.py               SQLite board: tasks, findings, usage, turns, connectors, workers, settings, conversations
+memory.py              shared project memory + working notes; prompt blocks; Markdown export
+runner.py              runs one agent on one task via the Agent SDK; allowlist gate; stop watcher;
+                       in-process tools memory_search / memory_propose / board_peek / note_progress
+daemon.py              role loop: claim → run → typed handoff (answer, plan dispatch, dev → QA, fix rounds)
+supervisor.py          keeps role workers alive and scales them with the queue (per-role min/max, global cap)
+worktree.py            one git worktree per chain; agents never touch your checkout
+connectors.py          MCP connectors as data: templates, secrets, live test + tool classification
+vault.py               secrets: macOS Keychain, or a 0600 JSON file elsewhere
+api.py                 FastAPI + SSE; serves ui/dist
+ui/                    React (Vite) UI
+mcp_servers/           bundled read-only MCP servers (Jira Data Center, GitLab, MySQL)
+excalidraw/            docker-compose for the optional shared canvas
+tasks.db, logs/, data/, worktrees/, workspace/   runtime state — all git-ignored
 ```
 
-## One-time setup
+## Optional pieces
+
+**Shared canvas.** `docker compose -f excalidraw/docker-compose.yml up -d` starts the canvas
+at <http://localhost:3000>; add the `excalidraw` connector from its template and assign it to
+`team_lead`. The lead then draws its diagrams there too; the chat shows "show live canvas"
+on turns that drew, and a snapshot of the scene is saved per run under `data/assets/`.
+
+**Local LLMs** are planned (a provider layer so cheap roles can run on Ollama); today every
+role runs on the Claude seat.
+
+## Running pieces separately
 
 ```bash
-cd ~/Desktop/project_x
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env        # fill in GITLAB_TOKEN etc.
-
-# Authenticate against your Team seat (NOT an API key):
-claude                       # /login once, then exit
-unset ANTHROPIC_API_KEY      # runner.py refuses to start if this is set
+.venv/bin/uvicorn api:app --port 8787 --reload      # API only
+(cd ui && npm run dev)                               # Vite on :5173, proxies /api to :8787
+.venv/bin/python supervisor.py                       # workers only (replaces daemon.py by hand)
+.venv/bin/python seed_task.py "Add rate limiting" --project ~/code/payment-service
+python monitor.py                                    # terminal board
+tail -f logs/flow.log                                # every claim, finish and handover
+ALFRED_DB=/tmp/other.db …                            # point everything at another board
 ```
 
-## Running
+## Troubleshooting
 
-```bash
-(cd ui && npm install && npm run build)   # once, and after UI changes
-./run_all.sh                 # supervisor (spawns role workers) + API/UI on :8787
-python seed_task.py "Add rate limiting to /charge" --project ~/Desktop/projects/payment-service
-python monitor.py            # live board
-tail -f logs/flow.log        # every claim, finish and handover
-```
+| Symptom | Cause / fix |
+|---|---|
+| Dashboard shows a red setup banner | Same as `python doctor.py`; each line has the fix. |
+| "ANTHROPIC_API_KEY is set" on start | Unset it; Alfred must run on your login, not an API key. |
+| UI looks old after a pull | `(cd ui && npm run build)`; the UI shows a reload banner when the served bundle changed. |
+| A chain is *stuck* | Open it: requeue, close, or send a finding back to the developer. |
+| "PLAN NOT DISPATCHED" | No repository: re-ask with a local checkout path (or mention the path in the message). |
+| Run failed with "JSON message exceeded maximum buffer size" | A tool result over 32 MB; narrow the request. |
+| Agents cannot see a connector | Test it, tick the role, check the tool is classified *read*; a YAML `mcp_servers` entry with the same name shadows it. |
+| Stray API after stopping `run_all.sh` | `pkill -f "uvicorn api:app"` |
 
-Then open http://127.0.0.1:8787 — **Ask** sends a job to the team lead, **Dashboard**
-shows the live board and flow log, a chain page shows the plan → commit → verdict
-timeline, the findings, the diff, and lets you send your own finding back to the
-developer as a new round.
+## Security posture
 
-UI development: `.venv/bin/uvicorn api:app --port 8787 --reload` plus `cd ui && npm run dev`
-(Vite on :5173 proxies `/api` to :8787).
-
-Or drop a `.md` file into `inbox/` — optional `project: /path` first line, rest is
-the job. The team lead daemon picks it up on its next poll.
-
-## Flow
-
-0. **team_lead** reads the request and decides what it is. A **question** ("what
-   options do we have", "why is X failing") gets `kind: answer` — the lead answers
-   it directly, with the code it relied on as verbatim snippets (path + line range),
-   the exact checkout it read (`source`: repo, branch, commit — injected by the
-   daemon, never guessed), and citations. The chain is complete; no developer runs.
-   The UI renders the answer as Markdown with code blocks and **Open in IntelliJ**
-   links (`idea://open?file=…&line=…`, needs IntelliJ installed).
-1. **Work** gets `kind: plan`: **team_lead** investigates (local Read, GitLab tools)
-   and produces subtasks with acceptance criteria. If the project is a git
-   repo, a worktree is created at `worktrees/<chain>` on branch `alfred/<chain>`.
-   One **developer** task is created per subtask.
-2. **developer** implements in the worktree, runs tests, commits, and reports
-   the commit sha as structured output — never a description of the diff.
-3. **qa** reads `git diff <base>..HEAD`, runs the tests, probes edge cases, and
-   returns a **verdict + typed findings**. Findings are stored on the board.
-4. **fail** → a developer fix task carrying the open findings as data, up to 3
-   rounds, then the chain parks as `stuck`. **pass** → chain complete.
-5. **You** review the branch: `git -C <repo> diff <base>..alfred/<chain>`, then
-   merge, push, or `git worktree remove` it. Nothing is pushed by agents.
-
-Every agent finishes by producing JSON that must match its role's contract
-(`contracts.py`); the SDK enforces the schema and the runner re-validates it.
-Tools outside a role's `allowed_tools` are denied in a hook, and agents run with
-`setting_sources=[]` so nothing from `~/.claude` leaks in.
-
-Crashed agent mid-task? Its claim expires after 15 minutes and the task reopens.
-
-`ALFRED_DB=/path/to/other.db` points the board (daemons and API) at a different
-SQLite file — useful for tests, or a second API instance on another port.
-
-## Connectors (UI → Connectors)
-
-MCP servers are configuration, not YAML edits. Add one from a template (Atlassian
-Cloud via mcp-remote, Confluence/Jira on-prem, GitLab, MySQL, custom stdio/HTTP) or
-**Import** a server already registered for Claude Desktop/Code. Secrets go to the
-macOS Keychain (`vault.py`, service `alfred-mcp`) — never to SQLite, YAML or logs.
-
-**Your Claude account's connectors** (the ones you added on claude.ai — Atlassian,
-Microsoft 365, Gmail, …) are available to agents without any configuration: press
-**Discover account connectors** (one haiku turn) to list them, tick roles, and set
-`account_connectors: true` in that role's YAML. That switches the role's
-`setting_sources` from `[]` to `["user"]`, which is the only way the CLI attaches
-those servers — and also loads your `~/.claude/settings.json` into the run. The
-allowlist gate still applies: only discovered read tools are allowed.
-
-**Test** starts the server, lists its tools and classifies each as *read* or
-*mutates* (MCP `readOnlyHint` annotation when present, otherwise a name heuristic
-biased towards *mutates*; you can flip any tool, and your decision sticks). Tick the
-roles that may use the connector. On the next run the runner adds the server to that
-role's `mcp_servers` and allows **only its read tools**; mutating and undiscovered
-tools are denied by the PreToolUse gate. Every connector keeps a **log** (config
-changes, tests with the server's own stderr, per-run status, denied calls) with
-secrets masked — open a connector's Details in the UI. A connector with the same name as one in
-the role's YAML is shadowed by the YAML one.
-
-## Cost
-
-`usage` rows are the SDK's estimate at API **list price** — on a Team seat that
-is a consumption meter against your rate-limit window, not a bill. The SDK reports
-cost per run; `turns` adds per-message token counts (exact, from the API) with a
-list-price estimate from `pricing.py` — the only pricing arithmetic in Alfred — so a
-chain page shows which turn or tool call was expensive. The Usage page shows cost per
-request (chain), per day/role/model.
-
-## Workers and scaling
-
-`supervisor.py` runs the workers. Each role's YAML declares `workers: {min, max}`:
-*min* permanent workers are kept alive; while a role's queue is longer than its
-live workers, ephemeral workers are spawned up to *max* (they exit after 90 s idle).
-A global cap (`settings.max_workers`, default 4, editable on the Agents page)
-bounds the total, because the Team seat shares one rate limit. The lead's plan
-drives the queue: N subtasks → N developer tasks → up to N developers; a subtask
-may name a `role` (any `agents/*.yaml`) to route it to a specialist.
-
-The Agents page edits the YAML (model, contract, prompt, tools, allow rules,
-limits, workers, account connectors) and shows live workers with what each is
-doing. Changes apply to that role's next run — no restart.
-
-## Adding a role
-
-Use **Add a role** on the Agents page (clones an existing role) or create
-`agents/<role>.yaml` by hand. The supervisor picks it up without a restart. Add a contract to `contracts.py` if the role needs a
-new output shape; reuse `review` for any reviewer-type role.
+Read-only by construction: allowlisted tools, mutating connector tools denied by default,
+agents never push, secrets in the Keychain, connector logs masked. Transcripts under
+`logs/tasks/` contain whatever the agents read (ticket text, code) — treat that folder like
+your own notes and do not share it.

@@ -22,11 +22,13 @@ import board
 import connectors as conn
 import contracts as contracts_module
 import daemon
+import memory
 import vault
 
 ROOT = Path(__file__).parent
 app = FastAPI(title="Alfred", version="0.1")
 board.init()
+memory.init()
 
 
 # ---------------------------------------------------------------- helpers ----
@@ -109,10 +111,14 @@ def _git(repo: str, *args: str) -> str | None:
 
 
 def _chain_diff(root: dict) -> tuple[str | None, str | None]:
-    repo, base = root.get("project_dir"), root.get("base_sha")
+    """Everything the chain changed versus its base: commits on alfred/<chain> AND uncommitted
+    edits in the worktree (no-commit mode), so the human gate sees the whole change."""
+    repo, base, wt = root.get("project_dir"), root.get("base_sha"), root.get("worktree")
     branch = f"alfred/{root['chain_id']}"
     if not (repo and base and os.path.isdir(repo)):
         return None, None
+    if wt and os.path.isdir(wt):
+        return _git(wt, "diff", base), _git(wt, "log", "--oneline", f"{base}..HEAD")
     return _git(repo, "diff", f"{base}..{branch}"), _git(repo, "log", "--oneline", f"{base}..{branch}")
 
 
@@ -149,6 +155,14 @@ def _ui_version() -> str:
     """Changes whenever the UI is rebuilt — the page polls it and offers a reload."""
     idx = ROOT / "ui" / "dist" / "index.html"
     return str(int(idx.stat().st_mtime)) if idx.is_file() else "dev"
+
+
+@app.get("/api/doctor")
+def doctor_report():
+    """Preflight checks (same as `python doctor.py --json`); the Dashboard shows failures."""
+    import doctor
+    checks = doctor.run_checks()
+    return {"ok": all(c["ok"] for c in checks if c["required"]), "checks": checks}
 
 
 @app.get("/api/health")
@@ -324,6 +338,8 @@ def chain(chain_id: str):
         "turns": board.turns_for_chain(chain_id),
         "code_links": (_code_links((_task(root)["structured"] or {}).get("answer") or {}) if _kind(root) == "answer" else []),
         "assets": [a for t in tasks_ for a in _task_assets(t["id"])],
+        "notes": memory.notes_for_chain(chain_id),
+        "memories": memory.list_(chain_id=chain_id),
         "canvas_url": board.get_setting("excalidraw_canvas_url", "http://localhost:3000"),
         "diff": diff, "log": log, "branch": f"alfred/{chain_id}", "status": _chain_status(tasks_), "kind": _kind(root),
         "cost_usd": sum(u["cost_usd"] for u in usage),
@@ -363,6 +379,34 @@ def _conversation_context(cid: str, max_turns: int = 3, max_chars: int = 1800) -
             "do not repeat earlier answers) ---\n" + "\n\n".join(parts))
 
 
+def _repo_from_text(text: str) -> str | None:
+    """An absolute path in the question that is (inside) a local git repository → attach it, so
+    "make the change in /Users/me/Desktop/x/session-proxy" dispatches developers without the field."""
+    import worktree
+    for m in _re.finditer(r"(?<![\w/])(/(?:Users|home|opt|srv|var|Volumes)/[^\s'\"`<>|,;]+)", text):
+        p = Path(m.group(1).rstrip(".:)"))
+        if p.is_file():
+            p = p.parent
+        try:
+            if p.is_dir() and worktree.is_repo(str(p)):
+                return str(worktree.repo_root(str(p)))
+        except Exception:
+            continue
+    return None
+
+
+def _repo_from_turns(cid: str) -> str | None:
+    """The local checkout an earlier answer in this conversation says it read (Answer.source.repo_path)."""
+    import worktree
+    for t in reversed(board.conversation_turns(cid)):
+        s = t.get("structured")
+        s = json.loads(s) if isinstance(s, str) and s else s
+        repo = (((s or {}).get("answer") or {}).get("source") or {}).get("repo_path") or ((s or {}).get("plan") or {}).get("repo_path")
+        if repo and Path(repo).is_dir() and worktree.is_repo(repo):
+            return str(worktree.repo_root(repo))
+    return None
+
+
 @app.post("/api/jobs")
 def create_job(job: JobIn):
     question = job.body.strip()
@@ -375,13 +419,34 @@ def create_job(job: JobIn):
             raise HTTPException(400, f"project_dir does not exist: {p}")
         project_dir = str(p.resolve())
     cid = job.conversation_id
-    if cid and not board.get_conversation(cid):
+    conv = board.get_conversation(cid) if cid else None
+    if cid and not conv:
         raise HTTPException(404, f"no conversation {cid}")
+    if not project_dir:
+        project_dir = _repo_from_text(question) or (conv or {}).get("project_dir") or (_repo_from_turns(cid) if cid else None)
+    if cid and project_dir and not (conv or {}).get("project_dir"):
+        board.set_conversation_project_dir(cid, project_dir)
+    # "remember: ..." stores a memory entry directly (active, source human) — no agent run, no cost,
+    # and no new conversation when typed into an empty chat
+    m = _re.match(r"^\s*remember(?P<scope>\s+global(?:ly)?)?\s*[:\-]\s*(?P<text>.+)$", question, _re.I | _re.S)
+    if m:
+        text = m.group("text").strip()
+        conv = (board.get_conversation(cid) if cid else None) or {}
+        # "remember: …" → this chat's project; "remember globally: …" → every project
+        key = memory.GLOBAL if m.group("scope") else memory.project_key(project_dir or conv.get("project_dir"))
+        title, _, rest = text.partition("\n")
+        if len(title) > 110:                       # long one-liner: title = first clause, body = everything
+            clause = _re.split(r"(?<=[.;:])\s+|,\s+(?=(?:the|and|but|so|we|it|that)\b)", title, maxsplit=1)[0].strip()
+            title, rest = (clause.rstrip(" .;:,") if 15 <= len(clause) <= 110 else title[:107].rsplit(" ", 1)[0] + "…"), text
+        entry = memory.add(key, "decision" if _re.search(r"\b(decid|agree|must|never|always|should)\w*", text, _re.I) else "fact",
+                           title.strip(), (rest or text).strip(), "human")
+        return {"task_id": None, "chain_id": None, "conversation_id": cid, "remembered": entry}
     if not cid:
         cid = board.create_conversation(job.title or question, project_dir)
     body = question + _conversation_context(cid)
     task_id = board.create_task(role="team_lead", title=(job.title or question)[:80], body=body,
-                                created_by="ui", project_dir=project_dir, conversation_id=cid, question=question)
+                                created_by="ui", project_dir=project_dir, conversation_id=cid, question=question,
+                                project_key=memory.project_key(project_dir))
     return {"task_id": task_id, "chain_id": task_id, "conversation_id": cid}
 
 
@@ -714,6 +779,103 @@ def connector_trust_writes(name: str, body: dict):
     conn.log(name, "trust_writes", "writes marked SAFE — all tools allowed to assigned roles (scratch tool, not a system of record)"
              if trust else "writes marked unsafe — only read tools allowed", level="warn" if trust else "info")
     return {"trust_writes": trust}
+
+
+# --------------------------------------------------------------- memory ----
+
+class MemoryIn(BaseModel):
+    project_key: str
+    kind: str = "fact"
+    title: str
+    body: str
+    tags: list[str] = []
+    status: str = "active"
+
+
+class MemoryPatch(BaseModel):
+    kind: str | None = None
+    title: str | None = None
+    body: str | None = None
+    tags: list[str] | None = None
+    status: str | None = None      # active (accept) | retired | proposed
+    project_key: str | None = None
+
+
+class IntakeIn(BaseModel):
+    notes: str
+    project_key: str | None = None
+    project_dir: str | None = None
+
+
+@app.get("/api/memory/projects")
+def memory_projects():
+    """Every memory key with counts, plus keys derived from repositories seen on the board."""
+    known = {p["project_key"]: p for p in memory.projects()}
+    with board.connect() as con:
+        dirs = [r["project_dir"] for r in con.execute(
+            "SELECT DISTINCT project_dir FROM tasks WHERE project_dir IS NOT NULL ORDER BY created_at DESC LIMIT 30")]
+    dirs_by_key: dict[str, list[str]] = {}
+    for d in dirs:
+        if not Path(d).is_dir() or str(Path(d)).startswith(str(ROOT / "worktrees")) or str(Path(d)).startswith(str(ROOT / "workspace")):
+            continue    # gone, or Alfred's own scratch checkouts
+        dirs_by_key.setdefault(memory.project_key(d), []).append(d)
+    out = []
+    for key in dict.fromkeys([memory.GLOBAL, *known.keys(), *dirs_by_key.keys()]):
+        p = known.get(key, {"project_key": key, "active": 0, "proposed": 0, "retired": 0, "updated_at": None})
+        out.append({**p, "dirs": dirs_by_key.get(key, []), "export": str(memory.EXPORT_DIR / f"{memory.safe_name(key)}.md")})
+    return out
+
+
+@app.get("/api/memory/key")
+def memory_key(project_dir: str):
+    return {"project_key": memory.project_key(project_dir)}
+
+
+@app.get("/api/memory")
+def memory_list(project_key: str | None = None, status: str | None = None, q: str | None = None, chain_id: str | None = None):
+    return memory.list_(project_key, status, q, chain_id)
+
+
+@app.post("/api/memory")
+def memory_create(m: MemoryIn):
+    if not m.title.strip() or not m.body.strip():
+        raise HTTPException(400, "title and body are required")
+    return memory.add(m.project_key.strip() or memory.GLOBAL, m.kind, m.title, m.body, "human", tags=m.tags, status=m.status)
+
+
+@app.patch("/api/memory/{mid}")
+def memory_update(mid: str, p: MemoryPatch):
+    if not memory.get(mid):
+        raise HTTPException(404, f"no memory {mid}")
+    return memory.update(mid, **p.model_dump(exclude_none=True))
+
+
+@app.delete("/api/memory/{mid}")
+def memory_delete(mid: str):
+    if not memory.delete(mid):
+        raise HTTPException(404, f"no memory {mid}")
+    return {"deleted": mid}
+
+
+@app.post("/api/memory/intake")
+def memory_intake(i: IntakeIn):
+    """Paste meeting notes → the team lead distils them into proposed memory entries (one lead run)."""
+    notes = i.notes.strip()
+    if len(notes) < 20:
+        raise HTTPException(400, "paste the meeting notes first")
+    key = (i.project_key or "").strip() or memory.project_key(i.project_dir)
+    title = f"Meeting notes intake → memory for {key}"
+    cid = board.create_conversation(title, i.project_dir)
+    task_id = board.create_task(role="team_lead", title=title[:80], body=memory.intake_body(notes, key), created_by="ui",
+                                project_dir=None, conversation_id=cid, question=f"Distil meeting notes into memory ({key})",
+                                project_key=key)
+    daemon.flow(f"[human] MEETING NOTES intake {task_id} for {key} ({len(notes)} chars)")
+    return {"task_id": task_id, "chain_id": task_id, "conversation_id": cid, "project_key": key}
+
+
+@app.get("/api/chains/{chain_id}/notes")
+def chain_notes(chain_id: str):
+    return memory.notes_for_chain(chain_id)
 
 
 # --------------------------------------------------------------- assets ----

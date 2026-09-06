@@ -27,7 +27,7 @@ if __name__ == "__main__":
         role="team_lead",
         title=args.job[:60],
         body=args.job,
-        created_by="kamal",
+        created_by=__import__("getpass").getuser(),
         project_dir=project_dir,
     )
     where = project_dir or "default workspace/"

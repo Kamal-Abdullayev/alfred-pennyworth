@@ -9,7 +9,7 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 -appl
 a { color: var(--accent); text-decoration: none; } a:hover { text-decoration: underline; }
 code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
 .layout { display: grid; grid-template-columns: 200px 1fr; min-height: 100vh; }
-nav { background: var(--panel); border-right: 1px solid var(--border); padding: 16px 12px; }
+nav { background: var(--panel); border-right: 1px solid var(--border); padding: 16px 12px; position: sticky; top: 0; height: 100vh; align-self: start; overflow-y: auto; }
 nav .brand { font-weight: 700; font-size: 16px; margin: 4px 8px 18px; letter-spacing: .3px; }
 nav a { display: block; padding: 8px 10px; border-radius: 6px; color: var(--fg); margin-bottom: 2px; }
 nav a.active, nav a:hover { background: var(--panel-2); text-decoration: none; }
@@ -142,3 +142,15 @@ ul.plain { margin: 6px 0; padding-left: 18px; }
 .stale-banner { position: fixed; top: 0; left: 200px; right: 0; z-index: 900; background: var(--warn); color: #0b0d12; padding: 6px 16px; font-size: 13px; display: flex; gap: 8px; align-items: center; } .stale-banner .btn-link { color: #0b0d12; border-color: #0b0d12; }
 
 .pill.cancelled { color: var(--warn); border-color: var(--warn); text-decoration: line-through; }
+
+.pill.decision { color: #bb9af7; border-color: #bb9af7; } .pill.convention { color: var(--accent); border-color: var(--accent); }
+.pill.fact { color: var(--ok); border-color: var(--ok); } .pill.glossary { color: var(--run); border-color: var(--run); }
+.pill.person { color: var(--warn); border-color: var(--warn); } .pill.question, .pill.todo { color: var(--bad); border-color: var(--bad); }
+.pill.proposed { color: var(--warn); border-color: var(--warn); } .pill.active { color: var(--ok); border-color: var(--ok); } .pill.retired { color: var(--muted); text-decoration: line-through; }
+.mem-layout { display: grid; grid-template-columns: 260px 1fr; gap: 18px; align-items: start; }
+.mem-proj { display: block; padding: 8px 10px; border-radius: 8px; border: 1px solid transparent; color: var(--fg); cursor: pointer; }
+.mem-proj:hover { background: var(--panel); text-decoration: none; } .mem-proj.active { background: var(--panel); border-color: var(--border); }
+.mem-proj .k { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .mem-proj .m { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.mem-card { border-left: 3px solid var(--border); } .mem-card.proposed { border-left-color: var(--warn); background: color-mix(in srgb, var(--warn) 5%, var(--panel)); }
+.bubble.system { background: transparent; border: 1px dashed var(--border); color: var(--muted); font-size: 13px; align-self: center; max-width: 80%; }
+.tag { display: inline-block; font-size: 11px; color: var(--muted); background: var(--panel-2); border-radius: 4px; padding: 0 6px; margin-right: 4px; }

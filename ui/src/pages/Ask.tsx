@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { api, streamTask, fmtCost, ago, leadOutput, type ChainDetail, type Conversation, type ConversationTurn, type TranscriptEvent } from '../api'
+import { api, streamTask, fmtCost, ago, leadOutput, type ChainDetail, type Conversation, type ConversationTurn, type TranscriptEvent , type Memory } from '../api'
 import { AnswerContent, PlanContent } from '../components/Answer'
 
 type Live = { status: string | null; events: TranscriptEvent[]; detail: ChainDetail | null; error: string | null; eventsLoaded: boolean }
@@ -97,7 +97,32 @@ function TurnCanvas({ url }: { url: string }) {
   )
 }
 
-function AssistantTurn({ turn, live, onNeedEvents, canvasUrl, onStop }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void; canvasUrl: string; onStop: () => Promise<void> }) {
+/** Memory entries a run proposed, reviewed right in the chat: keep for this chat's project, make global, or reject. */
+function Proposals({ items, onChange }: { items: Memory[]; onChange: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null)
+  const act = async (id: string, fn: () => Promise<unknown>) => { setBusy(id); try { await fn(); onChange() } finally { setBusy(null) } }
+  const pending = items.filter((m) => m.status === 'proposed')
+  const decided = items.filter((m) => m.status !== 'proposed')
+  return (
+    <div className="small" style={{ marginTop: 10, borderTop: '1px dashed var(--border)', paddingTop: 8 }}>
+      <div style={{ color: 'var(--warn)', marginBottom: 4 }}>✎ memory {pending.length ? `— ${pending.length} proposal${pending.length === 1 ? '' : 's'} to review` : `— ${decided.length} entr${decided.length === 1 ? 'y' : 'ies'} recorded`} · <a href={`/memory?project=${encodeURIComponent(items[0].project_key)}`}>Memory page</a></div>
+      {pending.map((m) => (
+        <div key={m.id} style={{ display: 'flex', gap: 8, alignItems: 'baseline', flexWrap: 'wrap', padding: '3px 0' }}>
+          <span className={`pill ${m.kind}`}>{m.kind}</span>
+          <span style={{ flex: 1, minWidth: 240 }}><b>{m.title}</b> <span className="muted">{m.body.length > 140 ? m.body.slice(0, 140) + '…' : m.body}</span></span>
+          <span className="actions">
+            <button className="btn-link" style={{ color: 'var(--ok)', borderColor: 'var(--ok)' }} disabled={busy === m.id} onClick={() => act(m.id, () => api.memoryUpdate(m.id, { status: 'active' }))} title={`keep for ${m.project_key}`}>✓ {m.project_key === 'global' ? 'accept' : 'this project'}</button>
+            {m.project_key !== 'global' && <button className="btn-link" disabled={busy === m.id} onClick={() => act(m.id, () => api.memoryUpdate(m.id, { status: 'active', project_key: 'global' }))} title="applies to every project">✓ global</button>}
+            <button className="btn-link" disabled={busy === m.id} onClick={() => act(m.id, () => api.memoryDelete(m.id))}>✗ reject</button>
+          </span>
+        </div>
+      ))}
+      {decided.length > 0 && <div className="muted">{decided.map((m) => `${m.title} (${m.status}${m.project_key === 'global' ? ', global' : ''})`).join(' · ')}</div>}
+    </div>
+  )
+}
+
+function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onStop }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void; onNeedDetail: () => void; canvasUrl: string; onStop: () => Promise<void> }) {
   const [stopping, setStopping] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
   const steps = toSteps(live.events)
@@ -125,6 +150,10 @@ function AssistantTurn({ turn, live, onNeedEvents, canvasUrl, onStop }: { turn: 
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
+      {finished && (live.detail?.memories?.length ?? 0) > 0 && <Proposals items={live.detail!.memories} onChange={onNeedDetail} />}
+      {finished && !live.detail?.memories?.length && !!lead?.memory_proposals?.length && (
+        <div className="small" style={{ marginTop: 10, color: 'var(--warn)' }}>✎ proposed {lead.memory_proposals.length} memory entr{lead.memory_proposals.length === 1 ? 'y' : 'ies'} · <a href="/memory?status=proposed">review</a></div>
+      )}
 
       {finished && lead?.kind === 'plan' && lead.plan && (() => { const dispatched = (live.detail?.tasks.length ?? 1) > 1; return (
         <div style={{ marginTop: 10 }}>
@@ -187,6 +216,7 @@ export default function Ask() {
     if (!cid) return
     api.conversation(cid).then((c) => {
       setTitle(c.title); setTurns(c.turns)
+      if (c.project_dir) setProject(c.project_dir)   // attached by you, or by the lead when it found the checkout
       for (const t of c.turns) {
         if (['done', 'failed', 'stuck'].includes(t.status)) api.chain(t.chain_id).then((d) => patch(t.chain_id, (l) => ({ ...l, detail: d }))).catch(() => {})
         else follow(t.chain_id)
@@ -199,6 +229,9 @@ export default function Ask() {
   useEffect(() => { try { localStorage.setItem(PROJECT_KEY, project) } catch { /* ignore */ } }, [project])
   useEffect(() => { if (stick.current) bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [turns.length, Object.values(lives).reduce((n, l) => n + l.events.length, 0)])
 
+  const [remembered, setRemembered] = useState<Memory[]>([])
+  useEffect(() => { setRemembered([]) }, [cid])
+
   async function send() {
     const q = text.trim(); if (!q) return
     setBusy(true); setErr(null)
@@ -206,10 +239,11 @@ export default function Ask() {
       const r = await api.createJob(q, project.trim() || undefined, cid)
       stick.current = true
       setText('')
+      if (r.remembered) { setRemembered((xs) => [...xs, r.remembered!]); return }
       if (!cid) { nav(`/ask/${r.conversation_id}`); return }
-      setTurns((ts) => [...ts, { chain_id: r.chain_id, question: q, status: 'open', kind: 'answer', created_at: Date.now() / 1000, finished_at: null, cost_usd: 0, structured: null, result: null }])
-      patch(r.chain_id, (l) => ({ ...l, status: 'open' }))
-      follow(r.chain_id)
+      setTurns((ts) => [...ts, { chain_id: r.chain_id!, question: q, status: 'open', kind: 'answer', created_at: Date.now() / 1000, finished_at: null, cost_usd: 0, structured: null, result: null }])
+      patch(r.chain_id!, (l) => ({ ...l, status: 'open' }))
+      follow(r.chain_id!)
       loadConvs()
     } catch (e) { setErr(String(e)) } finally { setBusy(false) }
   }
@@ -249,17 +283,25 @@ export default function Ask() {
             <div key={t.chain_id} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="bubble user">{t.question}<div className="meta">{new Date(t.created_at * 1000).toLocaleString()} · <a href={`/chains/${t.chain_id}`} className="mono">{t.chain_id}</a></div></div>
               <AssistantTurn turn={t} live={lives[t.chain_id] ?? empty()} onNeedEvents={() => loadEvents(t.chain_id)} canvasUrl={canvas.url}
+                onNeedDetail={() => api.chain(t.chain_id).then((d) => patch(t.chain_id, (l) => ({ ...l, detail: d }))).catch(() => {})}
                 onStop={async () => { await api.stopTask(t.chain_id); setTurns((ts) => ts.map((x) => x.chain_id === t.chain_id && x.status === 'open' ? { ...x, status: 'cancelled', result: 'cancelled before start' } : x)) }} />
+            </div>
+          ))}
+          {remembered.map((m) => (
+            <div key={m.id} className="bubble system">
+              ✓ remembered for <b>{m.project_key}</b> as a {m.kind}: “{m.title}” · <a href={`/memory?project=${encodeURIComponent(m.project_key)}`}>Memory page</a>
             </div>
           ))}
           <div ref={bottom} />
         </div>
         <div className="composer">
           <div className="inner">
-            <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder={cid ? 'Continue the conversation… (Enter to send, Shift+Enter for a new line)' : 'Ask the team lead… (Enter to send, Shift+Enter for a new line)'}
+            <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder={cid ? 'Continue the conversation… (Enter to send, Shift+Enter for a new line; "remember: …" stores a memory for this project, "remember globally: …" for all)' : 'Ask the team lead… (Enter to send, Shift+Enter for a new line; "remember: …" stores a memory for this project, "remember globally: …" for all)'}
               onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send() } }} />
+            {!project.trim() && <div className="small" style={{ color: 'var(--warn)', margin: '2px 2px 0' }}>no repository attached — the lead can only answer; paste a local checkout path below (or mention it in the message) for developers to apply changes</div>}
             <div className="bar">
-              <input className="mono" value={project} onChange={(e) => setProject(e.target.value)} placeholder="repository path (optional) — /Users/you/Desktop/projects/payment-service" />
+              <input className="mono" value={project} onChange={(e) => setProject(e.target.value)} placeholder="repository path (optional) — /Users/you/Desktop/projects/payment-service"
+                style={project.trim() ? {} : { borderColor: 'var(--warn)' }} title={project.trim() ? 'developers work in a private worktree of this checkout' : 'no repository attached: the lead can answer and read, but developers cannot change anything'} />
               <button onClick={send} disabled={busy || !text.trim()}>{busy ? 'Sending…' : 'Send'}</button>
             </div>
           </div>
