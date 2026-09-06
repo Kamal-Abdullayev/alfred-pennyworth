@@ -23,6 +23,7 @@ import traceback
 from pathlib import Path
 
 import board
+import memory
 import worktree
 from runner import run_agent
 
@@ -114,15 +115,22 @@ def fix_body(original_body: str, iteration: int, findings: list[dict]) -> str:
 
 def qa_body(dev_body: str, impl: dict, base_sha: str | None, iteration: int) -> str:
     base = (base_sha or "")[:12]
-    diff_hint = (f"  git log --oneline {base}..HEAD\n  git diff {base}..HEAD"
-                 if base else "  git log --oneline -5\n  git show HEAD")
+    committed = impl.get("committed", bool(impl.get("commit_sha")))
+    if committed:
+        diff_hint = (f"  git log --oneline {base}..HEAD\n  git diff {base}..HEAD"
+                     if base else "  git log --oneline -5\n  git show HEAD")
+        where = f"The developer's commits are on the current branch:\n{diff_hint}\n"
+    else:
+        where = (f"The developer did NOT commit (the human asked for no commits): the change is the "
+                 f"UNCOMMITTED working tree of the current directory.\n  git status\n  git diff {base or 'HEAD'}\n"
+                 f"Do not commit, stage or stash anything.\n")
     v = impl.get("verification") or {}
     return (
         f"Review a developer's change against this task.\n\n"
         f"{dev_body}\n\n"
         f"--- Change under review (round {iteration}) ---\n"
-        f"The developer's commits are on the current branch:\n{diff_hint}\n"
-        f"Developer reports commit {impl.get('commit_sha') or '(none)'} and says verification "
+        f"{where}"
+        f"Developer reports {'commit ' + impl['commit_sha'] if impl.get('commit_sha') else 'uncommitted changes in ' + ', '.join(impl.get('files_changed') or []) or 'no commit'} and says verification "
         f"was \"{v.get('result')}\" via: {'; '.join(v.get('commands_run') or []) or '(nothing)'}.\n\n"
         f"Do not trust that report. Read the diff, run the tests yourself, probe edge cases "
         f"the tests miss. A \"pass\" verdict requires that YOU ran the tests and saw them pass. "
@@ -169,9 +177,20 @@ def handoff(role, task, res) -> str:
         if kind == "answer":
             ans = out.get("answer") or {}
             src = ans.get("source") or {}
+            attached = ""
+            repo = src.get("repo_path")
+            if repo and not task.get("project_dir") and worktree.is_repo(repo):
+                # The lead found and read a local checkout the human never attached: remember it for
+                # the conversation so "now make the change" can dispatch developers, and file this
+                # run's memory proposals under that project instead of 'global'.
+                if task.get("conversation_id"):
+                    board.set_conversation_project_dir(task["conversation_id"], repo)
+                key = memory.project_key(repo)
+                moved = memory.rekey_chain(chain, key)
+                attached = f", attached {repo} to the conversation" + (f" ({moved} memory entries → {key})" if moved else "")
             return (f"ANSWERED chain {chain}: {len(ans.get('answer', ''))} chars, "
                     f"{len(ans.get('code') or [])} code ref(s), confidence={ans.get('confidence')}, "
-                    f"read {src.get('branch') or '?'}@{(src.get('commit') or '')[:8] or '?'}")
+                    f"read {src.get('branch') or '?'}@{(src.get('commit') or '')[:8] or '?'}{attached}")
         plan = out.get("plan") if "plan" in out else out
         if not plan or not plan.get("subtasks"):
             board.park_chain(chain, "team lead plan has no subtasks")
@@ -181,8 +200,18 @@ def handoff(role, task, res) -> str:
         # able to report "blocked" — at full price. Keep the plan, dispatch nothing.
         workdir = task.get("project_dir")
         if not (workdir and worktree.is_repo(workdir)):
-            return (f"PLAN NOT DISPATCHED for chain {chain}: {len(plan['subtasks'])} subtask(s) produced but no git "
-                    f"repository was given — ask again with a repository path to implement it")
+            # The human attached nothing, but the lead knows the local checkout (a path in the
+            # conversation, or one it read): adopt it for this chain and the whole conversation.
+            hinted = (plan.get("repo_path") or "").strip()
+            if hinted and Path(hinted).expanduser().is_dir() and worktree.is_repo(hinted):
+                workdir = worktree.repo_root(hinted)
+                board.set_task_project_dir(task["id"], workdir)
+                if task.get("conversation_id"):
+                    board.set_conversation_project_dir(task["conversation_id"], workdir)
+                flow(f"[team_lead] plan names local checkout {workdir} — attached to chain {chain} and its conversation")
+            else:
+                return (f"PLAN NOT DISPATCHED for chain {chain}: {len(plan['subtasks'])} subtask(s) produced but no git "
+                        f"repository was given — ask again with a repository path to implement it")
         # One isolated worktree per chain when the project is a git repo.
         if workdir and worktree.is_repo(workdir):
             wt = worktree.create(workdir, chain)
@@ -227,7 +256,8 @@ def handoff(role, task, res) -> str:
             project_dir=task.get("project_dir"),
             parent_id=task["id"],
         )
-        return f"HANDOVER developer -> qa (new task {new_id}): commit {(impl.get('commit_sha') or '')[:8]} ready for review"
+        change = f"commit {impl['commit_sha'][:8]}" if impl.get("commit_sha") else f"uncommitted changes ({len(impl.get('files_changed') or [])} files, no-commit mode)"
+        return f"HANDOVER developer -> qa (new task {new_id}): {change} ready for review"
 
     # ----------------------------------------------------------------- qa --
     if role == "qa":
@@ -287,6 +317,7 @@ async def main(role, ephemeral=False, idle_exit_s=90):
     if role not in cfgs:
         sys.exit(f"unknown role {role!r}. roles are agents/*.yaml: {', '.join(cfgs)}")
     board.init()
+    memory.init()
     # every role gets its log files up front, so the Logs page shows all agents even before they run
     (ROOT / "logs").mkdir(exist_ok=True)
     (ROOT / "logs" / "tasks").mkdir(exist_ok=True)
@@ -318,10 +349,12 @@ async def main(role, ephemeral=False, idle_exit_s=90):
             flow(f"[{role}] CLAIMED {task['id']} (chain {task['chain_id']}, round {task['iteration']}): "
                  f"{task['title']}  [workdir: {task.get('project_dir') or 'workspace/'}]")
             try:
-                prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "")
+                prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "") \
+                    + memory.context_block(task, role)
                 res = await run_agent(
                     cfgs[role], prompt, task.get("project_dir"),
-                    meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"]},
+                    meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"],
+                          "project_key": task.get("project_key") or memory.project_key(task.get("project_dir"))},
                 )
                 record_usage(task, role, res)
                 if res.get("cancelled"):
@@ -334,6 +367,13 @@ async def main(role, ephemeral=False, idle_exit_s=90):
                     flow(f"[{role}] FAILED {task['id']} — subtype={res.get('subtype')}: {res.get('text', '')[:160]}")
                     continue
                 board.complete(task["id"], res.get("text", ""), res.get("structured"))
+                proposals = (res.get("structured") or {}).get("memory_proposals") if isinstance(res.get("structured"), dict) else None
+                if proposals:
+                    key = task.get("project_key") or memory.project_key(task.get("project_dir"))
+                    stored = memory.store_proposals(key, proposals, role, task["chain_id"])
+                    if stored:
+                        flow(f"[{role}] PROPOSED {len(stored)} memory entr{'y' if len(stored) == 1 else 'ies'} for {key} "
+                             f"(review on the Memory page)")
                 if role != "team_lead" and board.chain_is_parked(task["chain_id"]):
                     flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — chain {task['chain_id']} "
                          f"is parked; result recorded, no hand-off")

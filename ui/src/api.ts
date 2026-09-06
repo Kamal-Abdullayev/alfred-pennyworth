@@ -30,6 +30,7 @@ export type Turn = {
 export type ChainDetail = {
   root: Task; tasks: Task[]; findings: Finding[]; usage: Usage[]; turns: Turn[]; code_links: CodeLink[]; assets: Asset[]; canvas_url: string
   diff: string | null; log: string | null; branch: string; status: string; kind: Kind; cost_usd: number
+  notes: TaskNote[]; memories: Memory[]
 }
 
 // --- the team lead's structured output ---------------------------------------
@@ -43,7 +44,15 @@ export type Citation = { source: string; ref: string; url: string | null }
 export type Diagram = { title: string; description: string; mermaid: string }
 export type Asset = { task_id: string; name: string; kind: 'image' | 'scene' | 'file'; bytes: number; url: string }
 export type Answer = { answer: string; code: CodeRef[]; diagrams?: Diagram[]; source: Source; citations: Citation[]; confidence: 'low' | 'medium' | 'high' }
-export type LeadOutput = { kind: Kind; plan: Plan | null; answer: Answer | null }
+export type MemoryKind = 'decision' | 'fact' | 'convention' | 'glossary' | 'person' | 'question' | 'todo'
+export type MemoryProposal = { kind: MemoryKind; title: string; body: string; tags: string[] }
+export type LeadOutput = { kind: Kind; plan: Plan | null; answer: Answer | null; memory_proposals?: MemoryProposal[] }
+export type Memory = {
+  id: string; scope: 'project' | 'global'; project_key: string; kind: MemoryKind; title: string; body: string; tags: string[]
+  source: string; status: 'active' | 'proposed' | 'retired'; chain_id: string | null; created_at: number; updated_at: number; accepted_at: number | null
+}
+export type MemoryProject = { project_key: string; active: number; proposed: number; retired: number; updated_at: number | null; dirs: string[]; export: string }
+export type TaskNote = { id: number; task_id: string; chain_id: string; role: string; note: string; created_at: number }
 
 /** Older rows stored a bare Plan; normalise everything to LeadOutput. */
 export function leadOutput(structured: unknown): LeadOutput | null {
@@ -136,7 +145,18 @@ export const api = {
   discoverConnectors: () => j<{ account_servers: string[]; tools: Record<string, string[]>; connectors: Connector[] }>('/api/connectors/discover', { method: 'POST' }),
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
   createJob: (body: string, project_dir?: string, conversation_id?: string) =>
-    j<{ task_id: string; chain_id: string; conversation_id: string }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
+    j<{ task_id: string | null; chain_id: string | null; conversation_id: string | null; remembered?: Memory }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
+  memoryProjects: () => j<MemoryProject[]>('/api/memory/projects'),
+  memoryKey: (project_dir: string) => j<{ project_key: string }>(`/api/memory/key?project_dir=${encodeURIComponent(project_dir)}`),
+  memoryList: (p: { project_key?: string; status?: string; q?: string; chain_id?: string }) => {
+    const qs = Object.entries(p).filter(([, v]) => v).map(([k, v]) => `${k}=${encodeURIComponent(v as string)}`).join('&')
+    return j<Memory[]>(`/api/memory${qs ? `?${qs}` : ''}`)
+  },
+  memoryCreate: (m: { project_key: string; kind: MemoryKind; title: string; body: string; tags: string[]; status?: string }) => j<Memory>('/api/memory', { method: 'POST', body: JSON.stringify(m) }),
+  memoryUpdate: (id: string, p: Partial<Pick<Memory, 'kind' | 'title' | 'body' | 'tags' | 'status' | 'project_key'>>) => j<Memory>(`/api/memory/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  memoryDelete: (id: string) => j<{ deleted: string }>(`/api/memory/${id}`, { method: 'DELETE' }),
+  memoryIntake: (notes: string, project_key?: string, project_dir?: string) => j<{ task_id: string; chain_id: string; conversation_id: string; project_key: string }>('/api/memory/intake', { method: 'POST', body: JSON.stringify({ notes, project_key: project_key || null, project_dir: project_dir || null }) }),
+  chainNotes: (chain_id: string) => j<TaskNote[]>(`/api/chains/${chain_id}/notes`),
   conversations: () => j<Conversation[]>('/api/conversations'),
   conversation: (id: string) => j<ConversationDetail>(`/api/conversations/${id}`),
   renameConversation: (id: string, title: string) => j<unknown>(`/api/conversations/${id}`, { method: 'PUT', body: JSON.stringify({ title }) }),

@@ -8,6 +8,7 @@
 #   - wall-clock limit per run (max_minutes)
 import asyncio
 import json
+import re
 import logging
 import os
 import string
@@ -20,11 +21,14 @@ from claude_agent_sdk import (
     ClaudeSDKClient, ClaudeAgentOptions,
     AssistantMessage, SystemMessage, TextBlock, ThinkingBlock, ToolUseBlock, ResultMessage,
     HookMatcher,
+    create_sdk_mcp_server,
+    tool as sdk_tool,
 )
 
 import board
 import connectors
 import contracts
+import memory
 import pricing
 
 ROOT = Path(__file__).parent
@@ -151,6 +155,60 @@ def _usage_get(u, *keys, default=0):
     return default
 
 
+def _text(t: str) -> dict:
+    return {"content": [{"type": "text", "text": t}]}
+
+
+def alfred_tools(role: str, meta: dict, project_dir: str | None):
+    """In-process MCP server (no subprocess) exposing the team's shared memory and board.
+    Agents may READ memory and PROPOSE entries; only the human activates them (Memory page)."""
+    key = meta.get("project_key") or memory.project_key(project_dir)
+    task_id, chain_id = meta["id"], meta.get("chain_id") or meta["id"]
+
+    @sdk_tool("memory_search", "Search the shared PROJECT MEMORY (decisions, facts, conventions, glossary, people, "
+              "open questions recorded by the human and the team) beyond what is in your prompt. Returns matching "
+              "active entries for this project and the global scope.", {"query": str})
+    async def memory_search(args):
+        q = str(args.get("query", "")).strip()
+        rows = [m for m in memory.list_(q=q, status="active", limit=20) if m["project_key"] in (key, memory.GLOBAL)]
+        if not rows:
+            return _text(f"No active memory matches {q!r} for {key}.")
+        return _text("\n".join(f"- [{m['kind']} #{m['id']} {m['project_key']}] {m['title']}: {m['body']}" for m in rows))
+
+    @sdk_tool("memory_propose", "Propose ONE entry for the shared project memory: a decision, constraint or fact the "
+              "human stated (or a meeting decided) that is not derivable from the code. The human reviews it before "
+              "any agent sees it. Do not propose things visible in the code or already in PROJECT MEMORY.",
+              {"kind": str, "title": str, "body": str, "tags": str})
+    async def memory_propose(args):
+        kind = str(args.get("kind", "fact")).lower()
+        if kind not in memory.KINDS:
+            return _text(f"kind must be one of {', '.join(memory.KINDS)}")
+        title, body = str(args.get("title", "")).strip(), str(args.get("body", "")).strip()
+        if not title or not body:
+            return _text("title and body are required")
+        tags = [t for t in re.split(r"[,\s]+", str(args.get("tags", ""))) if t]
+        m = memory.add(key, kind, title, body, role, tags=tags, status="proposed", chain_id=chain_id)
+        return _text(f"Proposed #{m['id']} ({kind}) for {key}; the human will accept or reject it on the Memory page.")
+
+    @sdk_tool("board_peek", "See what the rest of the team is doing right now: the other tasks in your chain and in this "
+              "repository, their status and result, and the progress notes teammates left.", {})
+    async def board_peek(args):
+        t = board.get_task(task_id) or {"id": task_id, "chain_id": chain_id, "project_dir": project_dir}
+        return _text(memory.board_block(t).strip() or "Nobody else is working on this chain or repository right now.")
+
+    @sdk_tool("note_progress", "Leave a one-line progress note for your teammates (what you are doing, what you found, "
+              "what you decided). It appears in their BOARD block and in board_peek. Use it when you start, when "
+              "you finish a milestone, and when you learn something another agent must know.", {"note": str})
+    async def note_progress(args):
+        note = str(args.get("note", "")).strip()
+        if not note:
+            return _text("note is empty")
+        memory.add_note(task_id, chain_id, role, note)
+        return _text("noted")
+
+    return create_sdk_mcp_server("alfred", tools=[memory_search, memory_propose, board_peek, note_progress])
+
+
 async def run_agent(config_path: str, task: str, project_dir: str | None = None,
                     meta: dict | None = None) -> dict:
     """Run one agent on one task. Returns a dict:
@@ -263,6 +321,11 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
 
     mcp_mapping = {**os.environ, "PROJECT_ROOT": str(ROOT), "PYTHON": os.sys.executable}
     mcp_servers = _expand_env(cfg.get("mcp_servers", {}), mcp_mapping)
+
+    # Shared memory + board awareness: an in-process MCP server every role gets.
+    if meta.get("id"):
+        mcp_servers["alfred"] = alfred_tools(cfg["name"], meta, project_dir)
+        allowed = allowed + ["mcp__alfred__*"]
 
     # Connectors configured in the UI and assigned to this role. Only their
     # non-mutating, discovered tools become allow rules; everything else is denied.

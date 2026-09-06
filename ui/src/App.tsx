@@ -7,6 +7,7 @@ import Agents from './pages/Agents'
 import UsagePage from './pages/Usage'
 import Connectors from './pages/Connectors'
 import Logs from './pages/Logs'
+import MemoryPage from './pages/Memory'
 
 /** The bundle is rebuilt often; when the server's UI version changes, offer a reload instead of
  *  letting the tab keep running stale code. */
@@ -35,6 +36,7 @@ export default function App() {
         <NavLink to="/" end>Dashboard</NavLink>
         <NavLink to="/ask">Ask</NavLink>
         <NavLink to="/agents">Agents</NavLink>
+        <NavLink to="/memory">Memory</NavLink>
         <NavLink to="/usage">Usage</NavLink>
         <NavLink to="/connectors">Connectors</NavLink>
         <NavLink to="/logs">Logs</NavLink>
@@ -46,6 +48,7 @@ export default function App() {
           <Route path="/ask/:cid" element={<Ask />} />
           <Route path="/chains/:id" element={<ChainPage />} />
           <Route path="/agents" element={<Agents />} />
+          <Route path="/memory" element={<MemoryPage />} />
           <Route path="/usage" element={<UsagePage />} />
           <Route path="/connectors" element={<Connectors />} />
           <Route path="/logs" element={<Logs />} />
