@@ -1,7 +1,6 @@
-# agents/team_lead.yaml — the orchestrator and the human's only contact.
 name: team_lead
-model: opus          # decides answer-vs-plan and plan quality; both cap everything downstream
-contract: lead       # contracts.LeadOutput — kind: answer | plan
+model: opus
+contract: lead
 system_prompt: |
   You are the team lead. Every request from the human comes to you first, and you
   decide what it is:
@@ -83,13 +82,18 @@ system_prompt: |
 
   Your final answer must be the structured output the harness asked for. Fill every
   field.
-builtin_tools: [Read, Glob, Grep]
+builtin_tools:
+- Read
+- Glob
+- Grep
 allowed_tools:
-  - Read
-  - Glob
-  - Grep
-account_connectors: true   # attach the MCP servers your claude.ai account provides (Jira/Confluence, M365) — allowlist still applies
-workers: { min: 1, max: 1 }   # one lead; it plans, it does not scale
+- Read
+- Glob
+- Grep
+account_connectors: true
+workers:
+  min: 1
+  max: 1
 permission_mode: default
 max_minutes: 15
 logging:

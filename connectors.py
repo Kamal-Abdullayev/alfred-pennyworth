@@ -10,6 +10,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 import board
@@ -71,7 +72,7 @@ TEMPLATES = {
     },
     "jira-onprem": {
         "label": "Jira Data Center — custom read-only server",
-        "kind": "stdio", "command": PYTHON, "args": [str(ROOT / "mcp_servers/jira/server.py")],
+        "kind": "stdio", "command": "${PYTHON}", "args": ["${PROJECT_ROOT}/mcp_servers/jira/server.py"],
         "env": {
             "JIRA_URL": {"secret": False, "default": None, "help": "e.g. https://jira.example.com"},
             "JIRA_TOKEN": {"secret": True, "default": None, "help": "Personal access token"},
@@ -89,24 +90,12 @@ TEMPLATES = {
     },
     "gitlab-onprem": {
         "label": "GitLab (self-hosted) — read-only: code, pipelines, MRs",
-        "kind": "stdio", "command": PYTHON, "args": [str(ROOT / "mcp_servers/gitlab/server.py")],
+        "kind": "stdio", "command": "${PYTHON}", "args": ["${PROJECT_ROOT}/mcp_servers/gitlab/server.py"],
         "env": {
             "GITLAB_URL": {"secret": False, "default": "https://gitlab.ballys.tech", "help": "Base URL"},
             "GITLAB_TOKEN": {"secret": True, "default": None, "help": "PAT with read_api scope"},
         }, "headers": {},
         "note": "Bundled read-only server (mcp_servers/gitlab): files, tree, search, MRs, discussions, pipelines, jobs, logs, artifacts.",
-    },
-    "mysql": {
-        "label": "MySQL (read-only user)",
-        "kind": "stdio", "command": PYTHON, "args": [str(ROOT / "mcp_servers/mysql/server.py")],
-        "env": {
-            "MYSQL_HOST": {"secret": False, "default": "127.0.0.1", "help": ""},
-            "MYSQL_PORT": {"secret": False, "default": "3306", "help": ""},
-            "MYSQL_USER": {"secret": False, "default": None, "help": "Use a SELECT-only user"},
-            "MYSQL_PASSWORD": {"secret": True, "default": None, "help": ""},
-            "MYSQL_DATABASE": {"secret": False, "default": "", "help": "optional default schema"},
-        }, "headers": {},
-        "note": "execute_write/confirm_write exist on this server; they are classified mutating and never allowed to agents.",
     },
     "custom-stdio": {
         "label": "Custom — stdio command",
@@ -186,10 +175,34 @@ def resolved_headers(row: dict) -> dict:
     return out
 
 
+# Bundled servers are stored with these tokens instead of absolute paths, so the board keeps
+# working when the project folder is renamed, moved, or cloned by someone else.
+TOKENS = {"${PROJECT_ROOT}": str(ROOT), "${PYTHON}": PYTHON}
+
+
+def portable(value):
+    """Absolute paths inside this project → tokens (used when saving a connector)."""
+    if isinstance(value, list):
+        return [portable(v) for v in value]
+    if isinstance(value, str):
+        return value.replace(PYTHON, "${PYTHON}").replace(str(ROOT), "${PROJECT_ROOT}")
+    return value
+
+
+def expand(value):
+    """Tokens → this machine's paths (used when launching)."""
+    if isinstance(value, list):
+        return [expand(v) for v in value]
+    if isinstance(value, str):
+        for k, v in TOKENS.items():
+            value = value.replace(k, v)
+    return value
+
+
 def server_config(row: dict) -> dict:
     """The mcp_servers entry the SDK expects."""
     if row["kind"] == "stdio":
-        cfg = {"type": "stdio", "command": row["command"], "args": json.loads(row.get("args") or "[]")}
+        cfg = {"type": "stdio", "command": expand(row["command"]), "args": expand(json.loads(row.get("args") or "[]"))}
         env = resolved_env(row)
         if env:
             cfg["env"] = env
@@ -385,6 +398,50 @@ async def probe_account_connectors() -> dict:
             "mcp_servers": found["mcp_servers"]}
 
 
+CALENDAR_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "date": {"type": "string"},
+        "meetings": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {"start": {"type": "string"}, "end": {"type": "string"}, "title": {"type": "string"},
+                           "location": {"type": ["string", "null"]}, "join_url": {"type": ["string", "null"]},
+                           "organizer": {"type": ["string", "null"]}, "attendees": {"type": "integer"},
+                           "response": {"type": ["string", "null"]}},
+            "required": ["start", "end", "title", "location", "join_url", "organizer", "attendees", "response"]}},
+        "note": {"type": ["string", "null"]},
+    },
+    "required": ["date", "meetings", "note"],
+}
+
+
+async def calendar_today(timezone_hint: str = "") -> dict:
+    """Today's meetings through the claude.ai Microsoft 365 connector: one short haiku turn
+    with only the calendar-search tool allowed. Costs a cent or two; the API caches it."""
+    from claude_agent_sdk import ClaudeSDKClient, ClaudeAgentOptions, ResultMessage
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        raise RuntimeError("ANTHROPIC_API_KEY is set; Alfred runs on the Claude seat login. Unset it.")
+    today = time.strftime("%A %Y-%m-%d")
+    opts = ClaudeAgentOptions(
+        model="haiku", max_turns=6, tools=[], setting_sources=["user"], cwd=str(ROOT), permission_mode="default",
+        allowed_tools=["mcp__claude_ai_Microsoft_365__outlook_calendar_search", "StructuredOutput"],
+        system_prompt=("You list the user's calendar for one day using the outlook_calendar_search tool, then answer with the "
+                       "structured output only. Times as HH:MM in the user's local time. Do not invent meetings; if the tool "
+                       "fails or is unavailable, return an empty list and explain in `note`."),
+        output_format={"type": "json_schema", "schema": CALENDAR_SCHEMA},
+    )
+    result = None
+    async with ClaudeSDKClient(options=opts) as client:
+        await client.query(f"List every meeting on my calendar for today, {today}{(' (' + timezone_hint + ')') if timezone_hint else ''}. "
+                           f"Include start, end, title, location or join link, organizer, attendee count and my response status.")
+        async for msg in client.receive_response():
+            if isinstance(msg, ResultMessage):
+                result = {"data": msg.structured_output, "cost_usd": float(msg.total_cost_usd or 0), "turns": msg.num_turns}
+    if not result or not isinstance(result.get("data"), dict):
+        raise RuntimeError("the calendar turn produced no structured output")
+    return result
+
+
 def log_denied(tool: str, ctx: dict) -> None:
     if not tool.startswith("mcp__"):
         return
@@ -439,10 +496,24 @@ def import_from_config(source: str, server_name: str) -> dict:
 
 # ------------------------------------------------------------ excalidraw ----
 
-async def excalidraw_call(tool: str, args: dict, timeout: float = 90.0):
+async def mcp_call(connector: str, tool: str, args: dict, timeout: float = 90.0):
+    """One call against a configured stdio connector (its own short-lived MCP session).
+    Used by the API for dashboard data — read tools only. Returns content blocks as dicts."""
+    row = board.get_connector(connector)
+    if not row:
+        raise RuntimeError(f"no '{connector}' connector on the board")
+    if not row.get("enabled"):
+        raise RuntimeError(f"connector '{connector}' is disabled")
+    known = {t["tool"]: t for t in board.connector_tools(connector)}
+    if tool in known and known[tool]["mutates"] and not row.get("trust_writes"):
+        raise RuntimeError(f"{tool} is classified as mutating; refusing to call it from the API")
+    return await excalidraw_call(tool, args, timeout, row=row)
+
+
+async def excalidraw_call(tool: str, args: dict, timeout: float = 90.0, row: dict | None = None):
     """One call against the excalidraw connector (its own short-lived MCP session).
     Returns the list of content blocks as plain dicts."""
-    row = board.get_connector("excalidraw")
+    row = row or board.get_connector("excalidraw")
     if not row:
         raise RuntimeError("no 'excalidraw' connector on the board")
     from mcp import ClientSession, StdioServerParameters

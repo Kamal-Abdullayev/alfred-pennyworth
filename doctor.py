@@ -48,13 +48,18 @@ def run_checks() -> list[dict]:
     out.append(check("venv", venv.is_dir(), "using .venv" if in_venv else ("exists" if venv.is_dir() else "missing"),
                      fix="./setup.sh  (creates .venv and installs requirements.txt)"))
     missing = []
-    for mod in ("claude_agent_sdk", "fastapi", "uvicorn", "pydantic", "yaml", "dotenv"):
+    for mod in ("claude_agent_sdk", "fastapi", "uvicorn", "pydantic", "yaml", "mcp", "httpx"):
         try:
             __import__(mod)
         except Exception:
             missing.append(mod)
     out.append(check("python deps", not missing, "all importable" if not missing else f"missing: {', '.join(missing)}",
                      fix=".venv/bin/pip install -r requirements.txt"))
+    # the bundled Jira/GitLab servers are written against the mcp 1.x FastMCP API; a venv that
+    # picked up mcp 2.x starts them with ModuleNotFoundError and every agent run loses them
+    code, txt = _run([sys.executable, "-c", "import mcp, mcp.server.fastmcp; print(mcp.__version__ if hasattr(mcp, '__version__') else 'ok')"])
+    out.append(check("bundled MCP servers", code == 0, "mcp 1.x FastMCP available" if code == 0 else "cannot start: " + txt.strip().splitlines()[-1][:120],
+                     fix=".venv/bin/pip install 'mcp>=1.2,<2'"))
     try:
         import sqlite3
         con = sqlite3.connect(":memory:")

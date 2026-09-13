@@ -1,10 +1,15 @@
-# pricing.py — per-turn cost estimate at Anthropic API list price.
+# pricing.py — attribution key for splitting a run's cost across its API messages.
 #
-# The SDK reports cost only per RUN (ResultMessage.total_cost_usd). Per-message
-# token counts are exact (AssistantMessage.usage); to attribute cost to a turn we
-# apply the published list prices below. This is the only place Alfred does
-# pricing arithmetic. The run-level SDK figure remains the authoritative number;
-# the UI shows both so any drift is visible.
+# The authoritative number is ResultMessage.total_cost_usd: the Claude Code CLI takes the
+# exact token counts the API returned and multiplies them by Anthropic's public API list
+# prices for the model (input, output, cache read, cache write). On a Team/Max seat nothing
+# is billed per token — that figure is what the run WOULD cost on the API, a consumption
+# meter against the seat's rate limits. With an API key it would be a real charge.
+#
+# Per-message input/cache token counts are exact too; per-message OUTPUT tokens are not
+# available (the stream carries a partial snapshot, the true total arrives once per run).
+# runner.py weighs each message with the table below and pro-rates those weights so they
+# add up to the run total. The table therefore only affects the split, not the total.
 #
 # USD per 1M tokens. Cache write priced at the 1-hour tier (what the SDK uses).
 PRICES = {

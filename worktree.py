@@ -1,7 +1,7 @@
 # worktree.py — git worktree isolation.
 #
 # Agents never touch the user's checked-out branch. Each chain gets its own
-# worktree under project_x/worktrees/<chain> on branch alfred/<chain>. Review
+# worktree under <project>/worktrees/<chain> on branch alfred/<chain>. Review
 # with `git diff <base_sha>..alfred/<chain>`; discard with remove().
 import subprocess
 from dataclasses import dataclass

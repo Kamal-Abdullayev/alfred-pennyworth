@@ -19,6 +19,10 @@ for c in python3.13 python3.12 python3.11 python3; do
 done
 [ -n "$PY" ] || { echo "Python 3.11+ is required (found: $(python3 --version 2>&1 || echo none))"; exit 1; }
 
+if [ -f .venv/pyvenv.cfg ] && ! grep -q "^command = .* $(pwd)/.venv" .venv/pyvenv.cfg 2>/dev/null && ! grep -q "$(pwd)" .venv/pyvenv.cfg 2>/dev/null; then
+  say "The .venv was created under a different path (folder renamed or moved) — recreating it"
+  rm -rf .venv
+fi
 if [ ! -x .venv/bin/python ]; then
   say "Creating .venv with $PY"
   "$PY" -m venv .venv

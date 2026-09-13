@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { api, streamTask, fmtCost, ago, leadOutput, type ChainDetail, type Conversation, type ConversationTurn, type TranscriptEvent , type Memory } from '../api'
+import { useNavigate, useParams, useLocation } from 'react-router-dom'
+import { api, streamTask, fmtCost, ago, leadOutput, type ChainDetail, type Conversation, type ConversationTurn, type TranscriptEvent , type Memory, type BriefDoc } from '../api'
+import { BriefBody } from './Brief'
 import { AnswerContent, PlanContent } from '../components/Answer'
 
 type Live = { status: string | null; events: TranscriptEvent[]; detail: ChainDetail | null; error: string | null; eventsLoaded: boolean }
@@ -129,6 +130,8 @@ function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onSt
   const finished = ['done', 'failed', 'stuck', 'cancelled', 'closed'].includes(turn.status) || !!live.detail
   const running = !finished && !live.error
   const lead = leadOutput(live.detail?.root.structured ?? turn.structured)
+  const rawS = live.detail?.root.structured ?? turn.structured
+  const brief = (rawS && typeof rawS === 'object' && 'headline' in (rawS as object)) ? (rawS as BriefDoc) : null
   const links = live.detail?.code_links ?? []
   const last = steps[steps.length - 1]
   const drew = !!turn.drew || live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
@@ -150,6 +153,7 @@ function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onSt
       {showSteps && (steps.length > 0 ? <Steps steps={steps} live={running} /> : <div className="muted small" style={{ marginTop: 6 }}>{live.eventsLoaded ? 'no transcript on disk for this turn' : 'loading…'}</div>)}
       {live.error && <div className="err small">{live.error}</div>}
       {finished && lead?.kind === 'answer' && lead.answer && <div style={{ marginTop: 10 }}><AnswerContent a={lead.answer} links={links} compact assets={live.detail?.assets ?? []} /></div>}
+      {finished && brief && <div style={{ marginTop: 10 }} className="brief-inline"><BriefBody b={brief} compact /><a className="btn-link" href={`/brief/${turn.chain_id}`} target="_blank" rel="noreferrer">open the full brief · PDF</a></div>}
       {finished && (live.detail?.memories?.length ?? 0) > 0 && <Proposals items={live.detail!.memories} onChange={onNeedDetail} />}
       {finished && !live.detail?.memories?.length && !!lead?.memory_proposals?.length && (
         <div className="small" style={{ marginTop: 10, color: 'var(--warn)' }}>✎ proposed {lead.memory_proposals.length} memory entr{lead.memory_proposals.length === 1 ? 'y' : 'ies'} · <a href="/memory?status=proposed">review</a></div>
@@ -229,6 +233,8 @@ export default function Ask() {
   useEffect(() => { try { localStorage.setItem(PROJECT_KEY, project) } catch { /* ignore */ } }, [project])
   useEffect(() => { if (stick.current) bottom.current?.scrollIntoView({ behavior: 'smooth' }) }, [turns.length, Object.values(lives).reduce((n, l) => n + l.events.length, 0)])
 
+  const loc = useLocation()
+  useEffect(() => { const p = (loc.state as { prefill?: string } | null)?.prefill; if (p) setText(p) }, [loc.state])
   const [remembered, setRemembered] = useState<Memory[]>([])
   useEffect(() => { setRemembered([]) }, [cid])
 
@@ -273,7 +279,7 @@ export default function Ask() {
       <div>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
           <h1 style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cid ? title || '…' : 'Ask'}</h1>
-          {cid && <span className="actions"><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
+          {cid && <span className="actions"><a className="btn-link" href={`/ask/${cid}/export`} target="_blank" rel="noreferrer" title="Printable page of the whole chat — save as PDF or download Markdown">export</a><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
         </div>
         {err && <p className="err">{err}</p>}
         <CanvasConnection url={canvas.url} configured={canvas.configured} />

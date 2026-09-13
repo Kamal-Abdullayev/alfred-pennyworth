@@ -46,14 +46,14 @@ function TurnsTable({ turns }: { turns: Turn[] }) {
   const est = turns.reduce((a, t) => a + t.est_cost_usd, 0)
   return (
     <details style={{ marginTop: 8 }}>
-      <summary className="small">{turns.length} turn{turns.length === 1 ? '' : 's'} · per-turn est≈${est.toFixed(4)} (list price; the run figure from the SDK is authoritative)</summary>
+      <summary className="small">{turns.length} API message{turns.length === 1 ? '' : 's'} · ${est.toFixed(4)} — input and cache tokens are exact per message; output tokens are only reported per run, so the run cost is split across messages by their input and cache weight</summary>
       <table className="small" style={{ marginTop: 6 }}>
-        <thead><tr><th>#</th><th>Model</th><th>Tools called</th><th>In</th><th>Cache read</th><th>Cache write</th><th>Out</th><th>est</th></tr></thead>
+        <thead><tr><th>#</th><th>Model</th><th>Tools called</th><th>In</th><th>Cache read</th><th>Cache write</th><th>share</th></tr></thead>
         <tbody>{turns.map((t) => (
           <tr key={t.id}><td>{t.turn_index}</td><td className="mono">{t.model.replace('claude-', '')}</td>
             <td className="mono">{t.tools.length ? t.tools.join(', ') : <span className="muted">{t.text_chars ? 'text' : '—'}</span>}</td>
             <td className="mono">{t.input_tokens.toLocaleString()}</td><td className="mono">{t.cache_read_tokens.toLocaleString()}</td>
-            <td className="mono">{t.cache_write_tokens.toLocaleString()}</td><td className="mono">{t.output_tokens.toLocaleString()}</td>
+            <td className="mono">{t.cache_write_tokens.toLocaleString()}</td>
             <td className="mono">${t.est_cost_usd.toFixed(4)}</td></tr>
         ))}</tbody>
       </table>

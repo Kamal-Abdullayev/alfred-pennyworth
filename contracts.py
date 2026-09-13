@@ -132,7 +132,50 @@ class LeadOutput(BaseModel):
                     "and are not already in PROJECT MEMORY. Usually empty. Never restate what the code says.")
 
 
+class BriefItem(BaseModel):
+    title: str = Field(description="One line, specific, in plain words")
+    detail: str = Field(description="One to three sentences: what, who said it, where (Teams thread, email, ticket, invite) and why it matters today")
+    url: str | None = Field(description="Deep link when there is one: ticket, invite, message, MR")
+
+
+class BriefMeeting(BaseModel):
+    start: str = Field(description="HH:MM local")
+    end: str = Field(description="HH:MM local")
+    title: str
+    where: str | None = Field(description="Room, 'Teams', or a join link")
+    note: str | None = Field(description="Organizer, who else, whether you are optional — or null")
+
+
+class BriefTicket(BaseModel):
+    key: str
+    title: str
+    status: str
+    note: str | None = Field(description="Why it matters today, or null")
+    url: str | None
+
+
+class BriefEmail(BaseModel):
+    sender: str
+    subject: str
+    when: str = Field(description="e.g. 'today 07:15' or 'Sep 3, 19:20'")
+    count: int = Field(description="Copies of the same alert/thread folded into this line; 1 if a single mail")
+
+
+class Brief(BaseModel):
+    """A personal daily brief for one software engineer — written from their calendar, Teams, email and Jira."""
+    date: str = Field(description="e.g. 'Wednesday · September 9 2026'")
+    headline: str = Field(description="One warm, specific sentence addressed to the person by first name, summarising the shape of the day. No bullet, no emoji.")
+    segments: list[BriefItem] = Field(description="The day in 2-4 time blocks: title like '8 – 10 AM', detail says what is in that block (or 'Empty').")
+    needs_attention: list[BriefItem] = Field(description="Things that need a decision or action from the person today. Most important first. Empty if nothing.")
+    resolved: list[BriefItem] = Field(description="Things that got settled since yesterday that the person may not have seen (cancelled meeting, closed ticket, answered thread).")
+    meetings: list[BriefMeeting]
+    tickets: list[BriefTicket] = Field(description="Unresolved Jira issues assigned to the person")
+    unread_emails: list[BriefEmail] = Field(description="Unread mail since the cut-off, repeated alerts of the same name folded into one line, newest first")
+    footer: str | None = Field(description="One sentence on scope: what period was read, what was left out — or null")
+
+
 CONTRACTS: dict[str, type[BaseModel]] = {
+    "brief": Brief,
     "lead": LeadOutput,
     "plan": Plan,
     "implement": Implement,

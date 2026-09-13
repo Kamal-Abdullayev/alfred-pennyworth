@@ -6,7 +6,7 @@ export type Task = {
   iteration: number; created_by: string; claimed_by: string | null
   created_at: number; claimed_at: number | null; finished_at: number | null
 }
-export type Kind = 'plan' | 'answer'
+export type Kind = 'plan' | 'answer' | 'brief'
 export type Chain = {
   chain_id: string; title: string; status: 'running' | 'passed' | 'failed' | 'stuck' | 'done' | 'answered' | string
   kind: Kind
@@ -52,6 +52,31 @@ export type Memory = {
   source: string; status: 'active' | 'proposed' | 'retired'; chain_id: string | null; created_at: number; updated_at: number; accepted_at: number | null
 }
 export type MemoryProject = { project_key: string; active: number; proposed: number; retired: number; updated_at: number | null; dirs: string[]; export: string }
+export type HomeData = {
+  now: number
+  stats: { working: number; queued: number; workers: number; need_human: number; today_cost: number; today_runs: number; week_cost: number; week_runs: number; proposals: number }
+  workers: { pid: number; role: string; ephemeral: boolean; since: number | null; task: { id: string; chain_id: string; title: string; chain_title: string; claimed_at: number | null; project_dir: string | null } | null }[]
+  queue: { id: string; chain_id: string; role: string; title: string }[]
+  active: { chain_id: string; title: string; tickets: string[]; project: string | null; conversation_id: string | null; started_at: number; cost_usd: number; subtasks: number | null
+    tasks: { id: string; role: string; title: string; status: string; iteration: number; claimed_by: string | null; claimed_at: number | null; created_at: number; finished_at: number | null }[] }[]
+  jira_url: string | null
+  by_day: { day: string; role: string; cost: number; runs: number }[]
+  recent_chains: Chain[]; need_human: Chain[]
+  todos: { id: string; kind: string; title: string; project_key: string }[]
+  conversations: Conversation[]
+  me_name: string
+  brief_schedule: Schedule | null
+}
+export type MyJira = { issues: { key: string; status: string; type: string; priority: string; assignee: string; summary: string; url: string | null }[]; error?: string; at: number; stale?: boolean }
+export type MyCalendar = { day: string; meetings: { start: string; end: string; title: string; location: string | null; join_url: string | null; organizer: string | null; attendees: number; response: string | null }[]; note?: string | null; error?: string; at: number; stale?: boolean; cost_usd?: number }
+export type Schedule = { id: string; name: string; kind: 'brief' | 'prompt'; role: string; prompt: string; project_dir: string | null; at_time: string; days: string; enabled: number; grace_min: number; last_run_at: number | null; last_task: string | null; next_run_at: number | null; runs: { id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; role: string }[] }
+export type BriefItem = { title: string; detail: string; url: string | null }
+export type BriefDoc = { date: string; headline: string; segments: BriefItem[]; needs_attention: BriefItem[]; resolved: BriefItem[]
+  meetings: { start: string; end: string; title: string; where: string | null; note: string | null }[]
+  tickets: { key: string; title: string; status: string; note: string | null; url: string | null }[]
+  unread_emails: { sender: string; subject: string; when: string; count: number }[]; footer: string | null }
+export type BriefRun = { task_id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; cost_usd: number; brief: BriefDoc }
+export type BriefLatest = { latest: BriefRun | null; running: { id: string; chain_id: string; status: string; created_at: number } | null }
 export type TaskNote = { id: number; task_id: string; chain_id: string; role: string; note: string; created_at: number }
 
 /** Older rows stored a bare Plan; normalise everything to LeadOutput. */
@@ -146,6 +171,17 @@ export const api = {
   usage: (days = 30) => j<UsageSummary>(`/api/usage/summary?days=${days}`),
   createJob: (body: string, project_dir?: string, conversation_id?: string) =>
     j<{ task_id: string | null; chain_id: string | null; conversation_id: string | null; remembered?: Memory }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
+  home: () => j<HomeData>('/api/home'),
+  schedules: () => j<{ schedules: Schedule[]; roles: string[]; me_name: string }>('/api/schedules'),
+  createSchedule: (s: { name: string; kind: string; role: string; prompt: string; project_dir: string | null; at_time: string; days: string }) => j<Schedule>('/api/schedules', { method: 'POST', body: JSON.stringify(s) }),
+  updateSchedule: (id: string, p: Partial<{ name: string; enabled: boolean; at_time: string; days: string; prompt: string; role: string }>) => j<Schedule>(`/api/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  deleteSchedule: (id: string) => j<{ deleted: string }>(`/api/schedules/${id}`, { method: 'DELETE' }),
+  runSchedule: (id: string) => j<{ task_id: string; chain_id: string; conversation_id: string }>(`/api/schedules/${id}/run`, { method: 'POST' }),
+  setMeName: (name: string) => j<{ me_name: string }>('/api/settings/me_name', { method: 'PUT', body: JSON.stringify({ name }) }),
+  briefLatest: () => j<BriefLatest>('/api/briefs/latest'),
+  brief: (taskId: string) => j<BriefRun>(`/api/briefs/${taskId}`),
+  myJira: (refresh = false) => j<MyJira>(`/api/me/jira${refresh ? '?refresh=1' : ''}`),
+  myCalendar: (refresh = false) => j<MyCalendar>(`/api/me/calendar${refresh ? '?refresh=1' : ''}`),
   doctor: () => j<{ ok: boolean; checks: { name: string; ok: boolean; required: boolean; detail: string; fix: string | null }[] }>('/api/doctor'),
   memoryProjects: () => j<MemoryProject[]>('/api/memory/projects'),
   memoryKey: (project_dir: string) => j<{ project_key: string }>(`/api/memory/key?project_dir=${encodeURIComponent(project_dir)}`),

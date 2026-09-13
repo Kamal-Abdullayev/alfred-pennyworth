@@ -3,7 +3,7 @@
 #   python seed_task.py "Add rate limiting to the payments API" \
 #       --project ~/Desktop/projects/payments-service
 #
-# Without --project the agents work in project_x/workspace/ (safe sandbox).
+# Without --project the agents work in <project>/workspace/ (safe sandbox).
 
 import argparse
 from pathlib import Path

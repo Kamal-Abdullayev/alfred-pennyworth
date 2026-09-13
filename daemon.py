@@ -38,6 +38,14 @@ def configs() -> dict[str, str]:
     return {p.stem: f"agents/{p.name}" for p in sorted(AGENTS_DIR.glob("*.yaml"))}
 
 
+def role_contract(role: str) -> str | None:
+    try:
+        import yaml
+        return (yaml.safe_load(open(ROOT / configs()[role])) or {}).get("contract")
+    except Exception:
+        return None
+
+
 def flow(msg):
     """One shared human-readable file with every claim, finish and handover."""
     logdir = ROOT / "logs"
@@ -201,6 +209,9 @@ def handoff(role, task, res) -> str:
                 f"parallelism={plan.get('parallelism')} — {where}")
 
     # ---------------------------------------------------------- developer --
+    if role_contract(role) in ("brief", "answer"):   # reporting roles: the structured output IS the result
+        return f"REPORTED {role_contract(role)} for chain {chain}: {len(json.dumps(structured))} chars"
+
     if role not in ("team_lead", "qa"):    # developer and any specialist role that implements
         impl = structured
         if impl.get("status") == "blocked":
@@ -308,11 +319,22 @@ async def main(role, ephemeral=False, idle_exit_s=90):
             try:
                 prompt = task["body"] + (repo_state(task.get("project_dir")) if role == "team_lead" else "") \
                     + memory.context_block(task, role)
-                res = await run_agent(
-                    cfgs[role], prompt, task.get("project_dir"),
-                    meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"],
-                          "project_key": task.get("project_key") or memory.project_key(task.get("project_dir"))},
-                )
+                async def heartbeat():
+                    while True:
+                        await asyncio.sleep(20)
+                        try:
+                            board.worker_heartbeat(pid, role, ephemeral, task["id"])
+                        except Exception:
+                            pass
+                hb = asyncio.create_task(heartbeat())
+                try:
+                    res = await run_agent(
+                        cfgs[role], prompt, task.get("project_dir"),
+                        meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"],
+                              "project_key": task.get("project_key") or memory.project_key(task.get("project_dir"))},
+                    )
+                finally:
+                    hb.cancel()
                 record_usage(task, role, res)
                 if res.get("cancelled"):
                     board.cancel_task(task["id"])

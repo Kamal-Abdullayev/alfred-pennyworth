@@ -40,7 +40,8 @@ def role_limits(cfgs):
 class Supervisor:
     def __init__(self, dry_run=False):
         self.dry_run = dry_run
-        self.procs: dict[int, dict] = {}   # pid -> {role, ephemeral, popen}
+        self.procs: dict[int, dict] = {}   # pid -> {role, ephemeral, popen, started}
+        self.stamp = self.source_stamp()
 
     def spawn(self, role, ephemeral):
         if self.dry_run:
@@ -48,8 +49,20 @@ class Supervisor:
             return
         args = [PYTHON, str(ROOT / "daemon.py"), role] + (["--ephemeral"] if ephemeral else [])
         p = subprocess.Popen(args, cwd=str(ROOT), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.procs[p.pid] = {"role": role, "ephemeral": ephemeral, "popen": p}
+        self.procs[p.pid] = {"role": role, "ephemeral": ephemeral, "popen": p, "started": time.time()}
         flow(f"[supervisor] started {role} worker pid {p.pid}{' (ephemeral)' if ephemeral else ''}")
+
+    def retire(self, pid, why):
+        info = self.procs.pop(pid, None)
+        if not info:
+            return
+        flow(f"[supervisor] retiring idle {info['role']} worker pid {pid} — {why}")
+        try:
+            info["popen"].terminate()
+            info["popen"].wait(timeout=10)
+        except Exception:
+            info["popen"].kill()
+        board.worker_gone(pid)
 
     def reap(self):
         for pid, info in list(self.procs.items()):
@@ -57,8 +70,34 @@ class Supervisor:
                 flow(f"[supervisor] {info['role']} worker pid {pid} exited ({'ephemeral' if info['ephemeral'] else 'PERMANENT — will restart'})")
                 del self.procs[pid]
 
+    def source_stamp(self):
+        """mtimes of the Python modules workers import; a change means running workers are stale."""
+        return {f: f.stat().st_mtime for f in ROOT.glob("*.py")}
+
+    def recycle_stale(self, live):
+        """Code on disk changed (git pull, an edit): retire idle permanent workers so they come
+        back on the new code. Busy workers finish their task first — they are retired on a later tick."""
+        stamp = self.source_stamp()
+        if stamp == self.stamp:
+            return
+        changed = sorted(f.name for f in stamp if stamp[f] != self.stamp.get(f))
+        busy = {w["pid"] for w in live if w.get("current_task")}
+        stale = [pid for pid, i in self.procs.items() if i["started"] < max(stamp.values()) and pid not in busy]
+        if not stale:
+            return                                   # everyone is busy; keep the old stamp and retry next tick
+        for pid in stale:
+            self.retire(pid, f"source changed ({', '.join(changed)[:80]}) — restarting on the new code")
+        if all(i["started"] >= max(stamp.values()) for i in self.procs.values()):
+            self.stamp = stamp
+
     def tick(self):
         self.reap()
+        self.recycle_stale(board.workers())
+        try:
+            import schedules
+            schedules.tick()
+        except Exception as e:  # noqa: BLE001 — a bad schedule must not stop the workers
+            flow(f"[schedule] tick failed: {e!r}")
         cfgs = configs()
         limits = role_limits(cfgs)
         max_total = int(board.get_setting("max_workers", DEFAULT_MAX_TOTAL))
@@ -84,6 +123,19 @@ class Supervisor:
             while backlog > running and running < lim["max"] and total < max_total:
                 self.spawn(role, ephemeral=True)
                 running += 1; total += 1; backlog -= 1
+            # scale DOWN: the role's min was lowered on the Agents page (or the global cap was), so
+            # retire idle permanent workers above the floor — newest first, never one mid-task
+            excess = mine_by_role.get(role, 0) - lim["min"]
+            if excess > 0 and backlog == 0:
+                busy = {w["pid"] for w in live if w.get("current_task")}
+                mine = sorted((pid for pid, i in self.procs.items() if i["role"] == role and not i["ephemeral"]), reverse=True)
+                for pid in mine:
+                    if excess <= 0:
+                        break
+                    if pid in busy:
+                        continue
+                    self.retire(pid, f"{role} min is {lim['min']}, {mine_by_role[role]} permanent workers running")
+                    mine_by_role[role] -= 1; excess -= 1; total -= 1
         return {"live": {r: by_role.get(r, 0) for r in limits}, "open": open_by_role, "limits": limits, "max_total": max_total}
 
     def run(self):

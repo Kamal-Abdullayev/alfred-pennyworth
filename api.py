@@ -47,12 +47,14 @@ def _kind(root: dict) -> str:
         s = json.loads(s) if s else None
     if not s:
         return "plan"
+    if "headline" in s and "segments" in s:
+        return "brief"
     return s.get("kind") or ("plan" if "subtasks" in s else "plan")
 
 
 def _chain_status(tasks: list[dict]) -> str:
     root = tasks[0]
-    if _kind(root) == "answer" and root["status"] == "done":
+    if _kind(root) in ("answer", "brief") and root["status"] == "done":
         return "answered"
     statuses = {t["status"] for t in tasks}
     if root["status"] == "cancelled" or ("cancelled" in statuses and not (statuses & {"open", "claimed", "stuck", "done"})):
@@ -707,8 +709,8 @@ def connector_save(c: ConnectorIn):
         else:
             headers[h] = {"secret": False, "value": spec.get("value")}
     existed = board.get_connector(name) is not None
-    board.upsert_connector({"name": name, "template": c.template, "kind": c.kind, "command": c.command,
-                            "args": json.dumps(c.args), "url": c.url, "env": json.dumps(env),
+    board.upsert_connector({"name": name, "template": c.template, "kind": c.kind, "command": conn.portable(c.command),
+                            "args": json.dumps(conn.portable(c.args)), "url": c.url, "env": json.dumps(env),
                             "headers": json.dumps(headers), "note": c.note, "enabled": int(c.enabled)})
     row = board.get_connector(name)
     conn.log(name, "saved", f"{'updated' if existed else 'created'} from template {c.template or 'custom'}",
@@ -779,6 +781,318 @@ def connector_trust_writes(name: str, body: dict):
     conn.log(name, "trust_writes", "writes marked SAFE — all tools allowed to assigned roles (scratch tool, not a system of record)"
              if trust else "writes marked unsafe — only read tools allowed", level="warn" if trust else "info")
     return {"trust_writes": trust}
+
+
+@app.get("/api/conversations/{cid}/export.md")
+def conversation_export_md(cid: str):
+    """The whole chat as one Markdown document: questions, answers, code refs, diagrams, sources, cost."""
+    c = board.get_conversation(cid)
+    if not c:
+        raise HTTPException(404, f"no conversation {cid}")
+    out = [f"# {c['title']}", "", f"_Alfred conversation {cid} · exported {time.strftime('%Y-%m-%d %H:%M')}"
+           + (f" · repository {c['project_dir']}" if c.get("project_dir") else "") + "_", ""]
+    total = 0.0
+    for t in board.conversation_turns(cid):
+        root = _task(t)
+        s = root.get("structured")
+        s = json.loads(s) if isinstance(s, str) and s else s
+        cost = board.chain_cost(t["chain_id"]) or 0.0
+        total += cost
+        when = time.strftime("%Y-%m-%d %H:%M", time.localtime(t["created_at"]))
+        out += [f"## Q: {(t.get('question') or t['body']).strip()}", "", f"_{when} · chain {t['chain_id']} · {t['status']} · est≈${cost:.2f}_", ""]
+        if not s:
+            out += [f"_(no answer — status {t['status']}{': ' + t['result'][:300] if t.get('result') else ''})_", ""]
+            continue
+        if s.get("kind") == "answer" and s.get("answer"):
+            a = s["answer"]; src = a.get("source") or {}
+            where = src.get("gitlab_project") or src.get("repo_path") or "unknown"
+            out += [f"**{a.get('confidence', '?')} confidence** · read from `{where}`"
+                    + (f" · `{src['branch']}`" if src.get("branch") else "") + (f" @ `{src['commit'][:8]}`" if src.get("commit") else ""), "",
+                    a.get("answer", "").strip(), ""]
+            for d in a.get("diagrams") or []:
+                out += [f"### Diagram: {d.get('title', '')}", "", d.get("description", ""), "", "```mermaid", d.get("mermaid", "").strip(), "```", ""]
+            if a.get("code"):
+                out += ["### Code", ""]
+                for cref in a["code"]:
+                    sym = f" — `{cref['symbol']}`" if cref.get("symbol") else ""
+                    out += [f"**`{cref['path']}:{cref['start_line']}-{cref['end_line']}`**{sym}  ", cref.get("why", ""), "",
+                            f"```{cref.get('language', '')}", cref.get("snippet", "").rstrip(), "```", ""]
+            if a.get("citations"):
+                out += ["### Sources", ""] + [f"- {ci['source']} — {ci['ref']}" + (f" ({ci['url']})" if ci.get("url") else "") for ci in a["citations"]] + [""]
+        else:
+            plan = s.get("plan") if "plan" in s else s
+            if plan:
+                out += ["**Plan**", "", plan.get("summary", ""), ""]
+                for st in plan.get("subtasks") or []:
+                    out += [f"- **{st['title']}** ({st['id']}): {st.get('description', '')}"]
+                    out += [f"    {i + 1}. {acc}" for i, acc in enumerate(st.get("acceptance") or [])]
+                out.append("")
+        if s.get("memory_proposals"):
+            out += ["_Memory proposals:_ " + " · ".join(p["title"] for p in s["memory_proposals"]), ""]
+    out += ["---", f"_Total est≈${total:.2f} (API list-price equivalent, not a bill)_", ""]
+    from fastapi.responses import PlainTextResponse
+    fname = _re.sub(r"[^A-Za-z0-9_-]+", "-", c["title"])[:60].strip("-") or cid
+    return PlainTextResponse("\n".join(out), media_type="text/markdown; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="alfred-{fname}.md"'})
+
+
+# ------------------------------------------------------------------ home ----
+# The Home page: what the agents are doing, today's meetings, my Jira tickets, what needs me.
+# External data is cached in settings so the page never blocks on Jira or a model turn.
+
+_ISSUE_RE = _re.compile(r"^(?P<key>[A-Z][A-Z0-9_]+-\d+)\s+\[(?P<status>[^\]]*)\]\s+(?P<type>\S+)\s+\((?P<priority>[^)]*)\)\s+@(?P<assignee>.+?)\s{2,}(?P<summary>.*)$")
+
+
+def _cache_get(key: str, ttl: float):
+    raw = board.get_setting(key)
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+    except Exception:
+        return None
+    d["stale"] = time.time() - d.get("at", 0) > ttl
+    return d
+
+
+def _cache_put(key: str, data: dict) -> dict:
+    d = {**data, "at": time.time(), "stale": False}
+    board.set_setting(key, json.dumps(d))
+    return d
+
+
+def _jira_url() -> str | None:
+    row = board.get_connector("jira-onprem")
+    if not row:
+        return None
+    try:
+        env = row["env"] if isinstance(row["env"], dict) else json.loads(row["env"] or "{}")
+        v = env.get("JIRA_URL")
+        return (v.get("value") if isinstance(v, dict) else v) or None
+    except Exception:
+        return None
+
+
+@app.get("/api/me/jira")
+async def me_jira(refresh: bool = False, max_results: int = 15):
+    """My open Jira issues via the bundled jira-onprem connector (read tool search_issues). Cached 10 min."""
+    cached = _cache_get("cache:me_jira", 600)
+    if cached and not refresh and not cached.get("stale"):
+        return cached
+    if not board.get_connector("jira-onprem"):
+        return {"error": "no jira-onprem connector configured", "issues": [], "at": time.time()}
+    jql = "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
+    try:
+        blocks = await conn.mcp_call("jira-onprem", "search_issues", {"jql": jql, "max_results": max_results}, timeout=45)
+        text = "\n".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    except Exception as e:  # noqa: BLE001
+        return {**(cached or {}), "error": str(e)[:300], "issues": (cached or {}).get("issues", []), "at": (cached or {}).get("at", time.time())}
+    url = _jira_url()
+    issues = []
+    for line in text.splitlines():
+        m = _ISSUE_RE.match(line.strip())
+        if m:
+            d = m.groupdict()
+            d["url"] = f"{url.rstrip('/')}/browse/{d['key']}" if url else None
+            issues.append(d)
+    return _cache_put("cache:me_jira", {"issues": issues, "jql": jql})
+
+
+@app.get("/api/me/calendar")
+async def me_calendar(refresh: bool = False):
+    """Today's meetings via the claude.ai Microsoft 365 connector (one haiku turn). Cached 30 min."""
+    cached = _cache_get("cache:me_calendar", 1800)
+    today = time.strftime("%Y-%m-%d")
+    if cached and cached.get("day") == today and not refresh and not cached.get("stale"):
+        return cached
+    if not board.get_connector("claude_ai_Microsoft_365"):
+        return {"error": "Microsoft 365 is not among your Claude account connectors (Connectors → Discover)", "meetings": [], "day": today, "at": time.time()}
+    try:
+        r = await conn.calendar_today(time.strftime("%Z"))
+    except Exception as e:  # noqa: BLE001
+        return {**(cached or {}), "error": str(e)[:300], "meetings": (cached or {}).get("meetings", []), "day": today, "at": (cached or {}).get("at", time.time())}
+    data = r["data"]
+    return _cache_put("cache:me_calendar", {"day": today, "meetings": data.get("meetings") or [], "note": data.get("note"), "cost_usd": r["cost_usd"]})
+
+
+@app.get("/api/home")
+def home():
+    """Everything the Home page shows from the board itself, in one call."""
+    now = time.time()
+    day0 = time.mktime(time.strptime(time.strftime("%Y-%m-%d"), "%Y-%m-%d"))
+    with board.connect() as con:
+        tasks_ = [dict(r) for r in con.execute("SELECT id, chain_id, role, title, status, claimed_by, claimed_at, created_at, project_dir FROM tasks WHERE status IN ('open','claimed') ORDER BY created_at")]
+        titles = {r["chain_id"]: r["title"] for r in con.execute("SELECT chain_id, title FROM tasks WHERE id = chain_id")}
+        today_cost = con.execute("SELECT COALESCE(SUM(cost_usd),0) c, COUNT(DISTINCT task_id) n FROM usage WHERE created_at>=?", (day0,)).fetchone()
+        week_cost = con.execute("SELECT COALESCE(SUM(cost_usd),0) c, COUNT(DISTINCT task_id) n FROM usage WHERE created_at>=?", (now - 7 * 86400,)).fetchone()
+        by_day = [dict(r) for r in con.execute(
+            "SELECT date(created_at,'unixepoch','localtime') day, role, SUM(cost_usd) cost, COUNT(DISTINCT task_id) runs "
+            "FROM usage WHERE created_at>=? GROUP BY day, role ORDER BY day", (now - 14 * 86400,))]
+        proposals = con.execute("SELECT COUNT(*) FROM memories WHERE status='proposed'").fetchone()[0]
+        todos = [dict(r) for r in con.execute("SELECT id, kind, title, project_key FROM memories WHERE status='active' AND kind IN ('todo','question') ORDER BY updated_at DESC LIMIT 8")]
+    # active work grouped by chain: what each ticket/question has in flight, and who is on it
+    with board.connect() as con:
+        active_ids = [r["chain_id"] for r in con.execute("SELECT DISTINCT chain_id FROM tasks WHERE status IN ('open','claimed') ORDER BY created_at")]
+        active = []
+        for cid in active_ids:
+            rows = [dict(r) for r in con.execute("SELECT id, role, title, status, iteration, claimed_by, claimed_at, created_at, finished_at FROM tasks WHERE chain_id=? ORDER BY created_at", (cid,))]
+            root = dict(con.execute("SELECT id, title, question, body, project_dir, conversation_id, created_at, structured FROM tasks WHERE id=?", (cid,)).fetchone() or {})
+            if not root:
+                continue
+            text = f"{root.get('question') or ''} {root.get('title') or ''}"
+            tickets = list(dict.fromkeys(_re.findall(r"\b[A-Z][A-Z0-9]{1,9}-\d{2,7}\b", text)))
+            st = root.get("structured"); st = json.loads(st) if isinstance(st, str) and st else st
+            plan = (st or {}).get("plan") if isinstance(st, dict) else None
+            active.append({"chain_id": cid, "title": (root.get("question") or root.get("title") or "")[:160], "tickets": tickets,
+                           "project": Path(root["project_dir"]).name if root.get("project_dir") else None, "conversation_id": root.get("conversation_id"),
+                           "started_at": root.get("created_at"), "cost_usd": board.chain_cost(cid) or 0.0,
+                           "subtasks": len((plan or {}).get("subtasks") or []) if plan else None, "tasks": rows})
+    workers = board.workers()
+    live = []
+    for w in workers:
+        t = next((x for x in tasks_ if x["id"] == w.get("current_task")), None)
+        live.append({"pid": w["pid"], "role": w["role"], "ephemeral": bool(w.get("ephemeral")), "since": w.get("started_at"),
+                     "task": ({"id": t["id"], "chain_id": t["chain_id"], "title": t["title"], "chain_title": titles.get(t["chain_id"], t["title"]),
+                               "claimed_at": t["claimed_at"], "project_dir": t["project_dir"]} if t else None)})
+    chains = _chains(60)
+    need = [c for c in chains if c["status"] in ("stuck", "not_dispatched", "failed")]
+    return {
+        "now": now,
+        "stats": {"working": sum(1 for t in tasks_ if t["status"] == "claimed"), "queued": sum(1 for t in tasks_ if t["status"] == "open"),
+                  "workers": len(workers), "need_human": len(need), "today_cost": today_cost["c"], "today_runs": today_cost["n"],
+                  "week_cost": week_cost["c"], "week_runs": week_cost["n"], "proposals": proposals},
+        "workers": live, "queue": [t for t in tasks_ if t["status"] == "open"][:8], "active": active, "jira_url": _jira_url(),
+        "by_day": by_day, "recent_chains": chains[:8], "need_human": need[:8], "todos": todos,
+        "conversations": board.list_conversations(limit=6),
+        "me_name": __import__("schedules").me_name(),
+        "brief_schedule": next((sc for sc in board.list_schedules() if sc["kind"] == "brief"), None),
+    }
+
+
+# ------------------------------------------------------------- schedules ----
+
+class ScheduleIn(BaseModel):
+    name: str
+    kind: str = "brief"                 # brief | prompt
+    role: str = "briefer"
+    prompt: str = ""
+    project_dir: str | None = None
+    at_time: str = "08:00"
+    days: str = "0,1,2,3,4"             # Mon..Fri
+    enabled: bool = True
+    grace_min: int = 180
+
+
+class SchedulePatch(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    role: str | None = None
+    prompt: str | None = None
+    project_dir: str | None = None
+    at_time: str | None = None
+    days: str | None = None
+    enabled: bool | None = None
+    grace_min: int | None = None
+
+
+def _sched_view(s: dict) -> dict:
+    import schedules
+    now = time.time()
+    return {**s, "next_run_at": schedules.next_run(s, now), "runs": board.schedule_runs(s["id"], limit=5)}
+
+
+@app.get("/api/schedules")
+def schedules_list():
+    return {"schedules": [_sched_view(s) for s in board.list_schedules()], "roles": list(daemon.configs()),
+            "me_name": __import__("schedules").me_name()}
+
+
+@app.post("/api/schedules")
+def schedules_create(s: ScheduleIn):
+    if not s.name.strip():
+        raise HTTPException(400, "name is required")
+    if s.role not in daemon.configs():
+        raise HTTPException(400, f"unknown role {s.role}")
+    if not _re.match(r"^\d{2}:\d{2}$", s.at_time):
+        raise HTTPException(400, "at_time must be HH:MM")
+    if s.kind == "prompt" and not s.prompt.strip():
+        raise HTTPException(400, "a prompt schedule needs the question text")
+    return _sched_view(board.create_schedule(s.name.strip(), s.kind, s.role, s.at_time, s.days, s.prompt, s.project_dir, s.enabled, s.grace_min))
+
+
+@app.patch("/api/schedules/{sid}")
+def schedules_update(sid: str, p: SchedulePatch):
+    if not board.get_schedule(sid):
+        raise HTTPException(404, f"no schedule {sid}")
+    return _sched_view(board.update_schedule(sid, **p.model_dump(exclude_none=True)))
+
+
+@app.delete("/api/schedules/{sid}")
+def schedules_delete(sid: str):
+    if not board.delete_schedule(sid):
+        raise HTTPException(404, f"no schedule {sid}")
+    return {"deleted": sid}
+
+
+@app.post("/api/schedules/{sid}/run")
+def schedules_run(sid: str):
+    import schedules
+    s = board.get_schedule(sid)
+    if not s:
+        raise HTTPException(404, f"no schedule {sid}")
+    tid = schedules.fire(s, "run now")
+    t = board.get_task(tid)
+    return {"task_id": tid, "chain_id": t["chain_id"], "conversation_id": t.get("conversation_id")}
+
+
+@app.put("/api/settings/me_name")
+def set_me_name(body: dict):
+    name = str(body.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "name is required")
+    board.set_setting("me_name", name)
+    return {"me_name": name}
+
+
+def _brief_of(task: dict) -> dict | None:
+    s = task.get("structured")
+    s = json.loads(s) if isinstance(s, str) and s else s
+    if not s or "headline" not in s:
+        return None
+    return {"task_id": task["id"], "chain_id": task["chain_id"], "conversation_id": task.get("conversation_id"), "status": task["status"],
+            "created_at": task["created_at"], "finished_at": task.get("finished_at"), "cost_usd": board.chain_cost(task["chain_id"]) or 0.0,
+            "brief": s}
+
+
+@app.get("/api/briefs")
+def briefs(limit: int = 10):
+    with board.connect() as con:
+        rows = [dict(r) for r in con.execute("SELECT * FROM tasks WHERE role='briefer' ORDER BY created_at DESC LIMIT ?", (limit,))]
+    out = []
+    for t in rows:
+        b = _brief_of(t) if t["status"] == "done" else None
+        out.append(b or {"task_id": t["id"], "chain_id": t["chain_id"], "conversation_id": t.get("conversation_id"), "status": t["status"],
+                         "created_at": t["created_at"], "finished_at": t.get("finished_at"), "cost_usd": board.chain_cost(t["chain_id"]) or 0.0, "brief": None})
+    return out
+
+
+@app.get("/api/briefs/latest")
+def brief_latest():
+    with board.connect() as con:
+        row = con.execute("SELECT * FROM tasks WHERE role='briefer' AND status='done' ORDER BY finished_at DESC LIMIT 1").fetchone()
+        running = con.execute("SELECT id, chain_id, status, created_at FROM tasks WHERE role='briefer' AND status IN ('open','claimed') ORDER BY created_at DESC LIMIT 1").fetchone()
+    return {"latest": _brief_of(dict(row)) if row else None, "running": dict(running) if running else None}
+
+
+@app.get("/api/briefs/{task_id}")
+def brief_one(task_id: str):
+    t = board.get_task(task_id)
+    if not t:
+        raise HTTPException(404, f"no task {task_id}")
+    b = _brief_of(t)
+    if not b:
+        raise HTTPException(404, "that task has no brief (not finished, or not a briefer run)")
+    return b
 
 
 # --------------------------------------------------------------- memory ----

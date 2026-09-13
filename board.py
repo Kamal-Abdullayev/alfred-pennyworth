@@ -170,6 +170,22 @@ CREATE TABLE IF NOT EXISTS connector_roles (
     role      TEXT NOT NULL,
     PRIMARY KEY (connector, role)
 );
+CREATE TABLE IF NOT EXISTS schedules (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    kind        TEXT NOT NULL,            -- brief | prompt
+    role        TEXT NOT NULL,            -- agent role that runs it
+    prompt      TEXT NOT NULL DEFAULT '', -- for kind=prompt: the question; for brief: extra focus
+    project_dir TEXT,
+    at_time     TEXT NOT NULL,            -- HH:MM local
+    days        TEXT NOT NULL,            -- comma list of 0-6 (Mon=0)
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    grace_min   INTEGER NOT NULL DEFAULT 180,  -- run late up to this many minutes (laptop was asleep)
+    last_run_at REAL,
+    last_task   TEXT,
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL
+);
 """
 
 
@@ -209,6 +225,14 @@ def init():
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
         # the spec-approval gate is gone; anything left waiting becomes claimable
         con.execute("UPDATE tasks SET status='open' WHERE status='awaiting_approval'")
+        # the project folder was renamed or moved: chain worktrees live under <root>/worktrees/<chain>,
+        # so re-point stored absolute paths at the current root
+        root = str(Path(__file__).resolve().parent)
+        for r in con.execute("SELECT id, worktree, project_dir FROM tasks WHERE worktree IS NOT NULL OR project_dir LIKE '%/worktrees/%'").fetchall():
+            for col in ("worktree", "project_dir"):
+                v = r[col]
+                if v and "/worktrees/" in v and not v.startswith(root + "/"):
+                    con.execute(f"UPDATE tasks SET {col}=? WHERE id=?", (root + "/worktrees/" + v.split("/worktrees/", 1)[1], r["id"]))
         ccols = [r["name"] for r in con.execute("PRAGMA table_info(connectors)")]
         if ccols and "trust_writes" not in ccols:
             con.execute("ALTER TABLE connectors ADD COLUMN trust_writes INTEGER NOT NULL DEFAULT 0")
@@ -704,3 +728,53 @@ def connectors_for_role(role):
 if __name__ == "__main__":
     init()
     print(f"board initialised at {DB_PATH}")
+
+
+# ------------------------------------------------------------ schedules ----
+
+def list_schedules():
+    with connect() as con:
+        return [dict(r) for r in con.execute("SELECT * FROM schedules ORDER BY at_time, name")]
+
+
+def get_schedule(sid):
+    with connect() as con:
+        r = con.execute("SELECT * FROM schedules WHERE id=?", (sid,)).fetchone()
+        return dict(r) if r else None
+
+
+def create_schedule(name, kind, role, at_time, days, prompt="", project_dir=None, enabled=True, grace_min=180):
+    sid = str(uuid.uuid4())[:8]
+    now = time.time()
+    with connect() as con:
+        con.execute("INSERT INTO schedules (id, name, kind, role, prompt, project_dir, at_time, days, enabled, grace_min, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (sid, name, kind, role, prompt or "", project_dir, at_time, days, int(enabled), grace_min, now, now))
+    return get_schedule(sid)
+
+
+def update_schedule(sid, **fields):
+    allowed = {"name", "kind", "role", "prompt", "project_dir", "at_time", "days", "enabled", "grace_min"}
+    sets = [f"{k}=?" for k in fields if k in allowed]
+    vals = [int(v) if k == "enabled" else v for k, v in fields.items() if k in allowed]
+    if not sets:
+        return get_schedule(sid)
+    with connect() as con:
+        con.execute(f"UPDATE schedules SET {', '.join(sets)}, updated_at=? WHERE id=?", (*vals, time.time(), sid))
+    return get_schedule(sid)
+
+
+def delete_schedule(sid):
+    with connect() as con:
+        return con.execute("DELETE FROM schedules WHERE id=?", (sid,)).rowcount > 0
+
+
+def mark_schedule_run(sid, task_id):
+    with connect() as con:
+        con.execute("UPDATE schedules SET last_run_at=?, last_task=? WHERE id=?", (time.time(), task_id, sid))
+
+
+def schedule_runs(sid, limit=20):
+    with connect() as con:
+        return [dict(r) for r in con.execute(
+            "SELECT id, chain_id, conversation_id, status, created_at, finished_at, role FROM tasks WHERE created_by=? ORDER BY created_at DESC LIMIT ?",
+            (f"schedule:{sid}", limit))]

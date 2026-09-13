@@ -84,3 +84,6 @@ __pycache__/
 /worktrees
 /workspace
 /data/
+
+# Claude Code / IDE local config
+.claude/

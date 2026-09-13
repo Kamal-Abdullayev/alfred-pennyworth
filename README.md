@@ -33,7 +33,7 @@ Then, in the UI:
 1. **Connectors** → add what your agents may read. Three ways:
    - **Discover account connectors**: the MCP servers your claude.ai account already has
      (Atlassian, Microsoft 365, …) — no configuration, just tick the roles.
-   - **Add from template**: Jira Data Center, Confluence, self-hosted GitLab, MySQL, the
+   - **Add from template**: Jira Data Center, Confluence, self-hosted GitLab, the
      Excalidraw canvas, or any custom stdio/HTTP server. Secrets go to the macOS Keychain
      (a 0600 file on other systems), never to the database or logs.
    - **Import** servers already registered for Claude Desktop / Claude Code.
@@ -97,7 +97,7 @@ connectors.py          MCP connectors as data: templates, secrets, live test + t
 vault.py               secrets: macOS Keychain, or a 0600 JSON file elsewhere
 api.py                 FastAPI + SSE; serves ui/dist
 ui/                    React (Vite) UI
-mcp_servers/           bundled read-only MCP servers (Jira Data Center, GitLab, MySQL)
+mcp_servers/           bundled read-only MCP servers (Jira Data Center, GitLab)
 excalidraw/            docker-compose for the optional shared canvas
 tasks.db, logs/, data/, worktrees/, workspace/   runtime state — all git-ignored
 ```
@@ -123,6 +123,17 @@ python monitor.py                                    # terminal board
 tail -f logs/flow.log                                # every claim, finish and handover
 ALFRED_DB=/tmp/other.db …                            # point everything at another board
 ```
+
+## Cost figures
+
+Every run's cost comes from the Claude Code CLI (`total_cost_usd`): exact token counts from
+the API × Anthropic's public API list prices for that model, including cache reads and
+writes. On a Team or Max seat nothing is billed per token, so treat it as **what the run
+would have cost on the API** — a consumption meter against your seat's rate limits, and a
+fair way to compare runs, roles and prompts. With an API key it would be a real charge of
+about that size. The per-message table on a chain page shows exact input and cache tokens per
+API message (output tokens are only reported per run) and splits the run total across the
+messages by that weight, so it always adds up to the run figure.
 
 ## Troubleshooting
 

@@ -69,7 +69,7 @@ export default function MemoryPage() {
   const [err, setErr] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [draft, setDraft] = useState<Draft>(emptyDraft())
-  const [intake, setIntake] = useState(false)
+  const [intake, setIntake] = useState(params.get('intake') === '1')
   const [notes, setNotes] = useState('')
   const [busy, setBusy] = useState(false)
   const [q, setQ] = useState(params.get('q') ?? '')

@@ -457,17 +457,33 @@ async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
                     # hook_started / hook_response fire for every hook call — noise, not signal
                     log_event(log, "system", {"subtype": msg.subtype, "data": msg.data})
             elif isinstance(msg, AssistantMessage):
-                # Per-message accounting: exact tokens from the API, cost from pricing.py.
+                # Per-message accounting. The CLI streams one AssistantMessage per content block
+                # (thinking, text, each tool call) and every block repeats the same usage snapshot
+                # for the same API message — so merge blocks by message_id or input/cache tokens are
+                # counted two or three times. Output tokens arrive as running partials; keep the max.
                 u = msg.usage or {}
                 tools = [b.name for b in msg.content if isinstance(b, ToolUseBlock)]
                 text_chars = sum(len(b.text) for b in msg.content if isinstance(b, TextBlock))
-                out["turn_log"].append({
-                    "turn_index": len(out["turn_log"]) + 1, "model": msg.model, "message_id": msg.message_id,
+                row = {
+                    "model": msg.model, "message_id": msg.message_id,
                     "input_tokens": int(u.get("input_tokens") or 0), "output_tokens": int(u.get("output_tokens") or 0),
                     "cache_read_tokens": int(u.get("cache_read_input_tokens") or 0),
                     "cache_write_tokens": int(u.get("cache_creation_input_tokens") or 0),
-                    "est_cost_usd": pricing.estimate(msg.model, u), "tools": tools, "text_chars": text_chars,
-                })
+                    "tools": tools, "text_chars": text_chars,
+                }
+                prev = out["turn_log"][-1] if out["turn_log"] else None
+                if prev and msg.message_id and prev["message_id"] == msg.message_id:
+                    for k in ("input_tokens", "cache_read_tokens", "cache_write_tokens", "output_tokens"):
+                        prev[k] = max(prev[k], row[k])
+                    prev["tools"] += tools
+                    prev["text_chars"] += text_chars
+                else:
+                    row["turn_index"] = len(out["turn_log"]) + 1
+                    out["turn_log"].append(row)
+                for r in out["turn_log"][-1:]:
+                    r["est_cost_usd"] = pricing.estimate(r["model"], {"input_tokens": r["input_tokens"], "output_tokens": r["output_tokens"],
+                                                                     "cache_read_input_tokens": r["cache_read_tokens"],
+                                                                     "cache_creation_input_tokens": r["cache_write_tokens"]})
                 for block in msg.content:
                     if isinstance(block, ThinkingBlock) and cfg["logging"].get("log_thinking") and block.thinking.strip():
                         log_event(log, "thinking", {"text": block.thinking[:max_len]})
@@ -483,6 +499,13 @@ async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
                 out["turns"] = getattr(msg, "num_turns", 0) or 0
                 out["duration_ms"] = getattr(msg, "duration_ms", 0) or 0
                 out["cost_usd"] = float(getattr(msg, "total_cost_usd", 0) or 0)
+                # The CLI's run total (exact tokens × its own price table) is the authoritative
+                # figure; per-turn estimates are only an attribution key. Pro-rate them so the
+                # turn column adds up to the run total instead of drifting from it.
+                raw = sum(r["est_cost_usd"] for r in out["turn_log"])
+                if out["cost_usd"] > 0 and raw > 0:
+                    for r in out["turn_log"]:
+                        r["est_cost_usd"] = r["est_cost_usd"] / raw * out["cost_usd"]
                 mu = getattr(msg, "model_usage", None) or {}
                 out["model_usage"] = {
                     model: {
