@@ -65,11 +65,29 @@ def next_run(s: dict, now: float) -> float | None:
     return None
 
 
+def local_tz() -> dict:
+    """Name, abbreviation and UTC offset of the machine's time zone — the agents get UTC from Outlook."""
+    import os
+    now = datetime.now().astimezone()
+    name = None
+    try:
+        link = os.readlink("/etc/localtime")
+        name = link.split("zoneinfo/", 1)[1] if "zoneinfo/" in link else None
+    except Exception:
+        pass
+    off = now.strftime("%z")
+    return {"name": name or now.tzname(), "abbr": now.tzname(), "offset": f"UTC{off[:3]}:{off[3:]}", "now": now.strftime("%Y-%m-%d %H:%M")}
+
+
 def brief_body(s: dict, when: datetime) -> str:
     cutoff = (when - timedelta(days=1)).strftime("%A %Y-%m-%d 07:00")
     focus = f"\nExtra focus the person asked for: {s['prompt'].strip()}\n" if (s.get("prompt") or "").strip() else ""
+    tz = local_tz()
     return (f"DAILY BRIEF for {me_name()} — {when.strftime('%A, %B %-d %Y')}, written at {when.strftime('%H:%M')} local time.\n"
-            f"Read everything since {cutoff}: today's calendar, unread mail, Teams chats and channels, Jira issues assigned to me.\n"
+            f"TIME ZONE: the person is in {tz['name']} ({tz['abbr']}, {tz['offset']}). Calendar and mail tools return times in UTC "
+            f"(ISO strings ending in Z or +00:00) — CONVERT every time to {tz['abbr']} before writing it. A meeting at 08:00Z is "
+            f"08:00 plus the offset in local time; do the arithmetic with the offset above for every meeting and mail.\n"
+            f"Read everything since {cutoff} local: today's calendar, unread mail, Teams chats and channels, Jira issues assigned to me.\n"
             f"{focus}Write the brief as the structured output. Do not send or change anything anywhere.")
 
 

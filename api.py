@@ -908,7 +908,8 @@ async def me_calendar(refresh: bool = False):
     if not board.get_connector("claude_ai_Microsoft_365"):
         return {"error": "Microsoft 365 is not among your Claude account connectors (Connectors → Discover)", "meetings": [], "day": today, "at": time.time()}
     try:
-        r = await conn.calendar_today(time.strftime("%Z"))
+        tz = __import__("schedules").local_tz()
+        r = await conn.calendar_today(f"{tz['name']} ({tz['abbr']}, {tz['offset']})")
     except Exception as e:  # noqa: BLE001
         return {**(cached or {}), "error": str(e)[:300], "meetings": (cached or {}).get("meetings", []), "day": today, "at": (cached or {}).get("at", time.time())}
     data = r["data"]
@@ -1003,8 +1004,10 @@ def _sched_view(s: dict) -> dict:
 
 @app.get("/api/schedules")
 def schedules_list():
+    import schedules as _sch
     return {"schedules": [_sched_view(s) for s in board.list_schedules()], "roles": list(daemon.configs()),
-            "me_name": __import__("schedules").me_name()}
+            "me_name": _sch.me_name(), "tz": _sch.local_tz(), "now": time.time(),
+            "supervisor_alive": len(board.workers()) > 0}
 
 
 @app.post("/api/schedules")
