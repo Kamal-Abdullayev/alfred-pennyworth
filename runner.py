@@ -205,7 +205,7 @@ def alfred_tools(role: str, meta: dict, project_dir: str | None):
 
 
 async def run_agent(config_path: str, task: str, project_dir: str | None = None,
-                    meta: dict | None = None) -> dict:
+                    meta: dict | None = None, resume: str | None = None) -> dict:
     """Run one agent on one task. Returns a dict:
        text, structured (validated contract dict or None), contract, subtype,
        is_error, turns, duration_ms, cost_usd, model_usage, denied (list of tools),
@@ -358,6 +358,10 @@ async def run_agent(config_path: str, task: str, project_dir: str | None = None,
     # A single big tool result (e.g. Read of a large file, GitLab MR changes) can exceed the
     # SDK's default 1 MB JSON frame and kill the run mid-way; allow 32 MB.
     opt_kwargs["max_buffer_size"] = 32 * 1024 * 1024
+    if resume:
+        # Continue the lead's earlier Claude session for this chat: the whole history is already
+        # there (cached), so a follow-up costs cents instead of re-reading everything.
+        opt_kwargs["resume"] = resume
     options = ClaudeAgentOptions(**opt_kwargs)
 
     timeout_s = float(cfg.get("max_minutes", 15)) * 60
@@ -444,6 +448,8 @@ async def _run(task, options, cfg, log, hlog, max_len, meta) -> dict:
             if isinstance(msg, SystemMessage):
                 if msg.subtype == "init":
                     d = msg.data or {}
+                    out["session_id"] = d.get("session_id")
+                    out["resumed"] = bool(getattr(options, "resume", None))
                     servers = d.get("mcp_servers") or []
                     tools = d.get("tools") or []
                     log_event(log, "init", {"model": d.get("model"), "mcp_servers": servers, "tools": tools,

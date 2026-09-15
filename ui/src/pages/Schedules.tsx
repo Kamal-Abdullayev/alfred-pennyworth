@@ -1,44 +1,142 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, ago, fmtTime, type Schedule } from '../api'
+import { api, fmtTime, type Schedule } from '../api'
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-type Draft = { name: string; kind: 'brief' | 'prompt'; role: string; prompt: string; project_dir: string; at_time: string; days: number[] }
-const emptyDraft = (): Draft => ({ name: 'Morning brief', kind: 'brief', role: 'briefer', prompt: '', project_dir: '', at_time: '08:00', days: [0, 1, 2, 3, 4] })
+type Draft = { name: string; kind: 'brief' | 'prompt' | 'watch'; role: string; prompt: string; project_dir: string; at_time: string; days: number[]; every_min: number; active_from: string; active_to: string }
+const emptyDraft = (): Draft => ({ name: 'Morning brief', kind: 'brief', role: 'briefer', prompt: '', project_dir: '', at_time: '08:00', days: [0, 1, 2, 3, 4], every_min: 30, active_from: '08:00', active_to: '19:00' })
+type Meta = { schedules: Schedule[]; roles: string[]; me_name: string; tz: { name: string; abbr: string; offset: string; now: string }; now: number; supervisor_alive: boolean }
+
+function until(ts: number | null | undefined, now: number) {
+  if (!ts) return '—'
+  const s = Math.max(0, Math.floor(ts - now))
+  if (s < 3600) return `in ${Math.max(1, Math.round(s / 60))} min`
+  if (s < 86400) return `in ${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`
+  return `in ${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`
+}
+
+/** Minutes a run started after its slot that day (0 for on time; null when not a scheduled slot). */
+function lateness(run: { created_at: number }, s: Schedule) {
+  const d = new Date(run.created_at * 1000)
+  const [hh, mm] = s.at_time.split(':').map(Number)
+  const due = new Date(d); due.setHours(hh, mm, 0, 0)
+  const diff = Math.round((d.getTime() - due.getTime()) / 60000)
+  return diff >= 0 && diff <= s.grace_min ? diff : null
+}
 
 function DayPicker({ value, onChange }: { value: number[]; onChange: (d: number[]) => void }) {
   return (
-    <span className="actions">
-      {DAYS.map((d, i) => <button key={d} type="button" className="btn-link" style={value.includes(i) ? { borderColor: 'var(--accent)', color: 'var(--accent)' } : {}}
-        onClick={() => onChange(value.includes(i) ? value.filter((x) => x !== i) : [...value, i].sort())}>{d}</button>)}
+    <span className="daypick">
+      {DAYS.map((d, i) => <button key={d} type="button" className={value.includes(i) ? 'on' : ''} onClick={() => onChange(value.includes(i) ? value.filter((x) => x !== i) : [...value, i].sort())}>{d}</button>)}
     </span>
   )
 }
 
-export default function SchedulesPage() {
+function ScheduleCard({ s, meta, busy, act }: { s: Schedule; meta: Meta; busy: string | null; act: (label: string, fn: () => Promise<unknown>) => Promise<void> }) {
   const nav = useNavigate()
-  const [data, setData] = useState<{ schedules: Schedule[]; roles: string[]; me_name: string } | null>(null)
+  const [edit, setEdit] = useState(false)
+  const [d, setD] = useState<Draft>({ name: s.name, kind: s.kind, role: s.role, prompt: s.prompt, project_dir: s.project_dir ?? '', at_time: s.at_time, days: s.days.split(',').filter(Boolean).map(Number), every_min: s.every_min ?? 30, active_from: s.active_from ?? '08:00', active_to: s.active_to ?? '19:00' })
+  const days = s.days.split(',').filter(Boolean).map(Number)
+  const lastLate = s.runs[0] ? lateness(s.runs[0], s) : null
+  return (
+    <div className={`sched ${s.enabled ? '' : 'paused'}`}>
+      <div className="sched-time">
+        <div className="big">{s.kind === 'watch' ? <>{s.every_min}<span style={{ fontSize: 14, fontWeight: 500, marginLeft: 3 }}>min</span></> : s.at_time}</div>
+        <div className="week">{DAYS.map((dn, i) => <span key={dn} className={days.includes(i) ? 'on' : ''} title={dn}>{dn[0]}</span>)}</div>
+        <div className="muted small">{s.kind === 'watch' && <div>{s.active_from}–{s.active_to}</div>}{s.enabled ? until(s.next_run_at, meta.now) : 'paused'}</div>
+      </div>
+      <div className="sched-body">
+        <div className="row">
+          <b style={{ fontSize: 15 }}>{s.name}</b>
+          <span className={`pill ${s.kind === 'brief' ? 'answered' : s.kind === 'watch' ? 'running' : ''}`}>{s.kind === 'brief' ? 'daily brief' : s.kind === 'watch' ? 'watcher' : 'prompt'}</span>
+          <span className={`pill ${s.role}`}>{s.role}</span>
+          {!s.enabled && <span className="pill">paused</span>}
+          <span className="actions" style={{ marginLeft: 'auto' }}>
+            <button className="btn-link" disabled={busy !== null} onClick={() => act('run', async () => { const r = await api.runSchedule(s.id); nav(`/ask/${r.conversation_id}`) })}>▶ run now</button>
+            <button className="btn-link" onClick={() => setEdit(!edit)}>{edit ? 'close' : 'edit'}</button>
+            <button className="btn-link" disabled={busy !== null} onClick={() => act('toggle', () => api.updateSchedule(s.id, { enabled: !s.enabled }))}>{s.enabled ? 'pause' : 'enable'}</button>
+            <button className="btn-link" disabled={busy !== null} onClick={() => act('delete', () => api.deleteSchedule(s.id))}>delete</button>
+          </span>
+        </div>
+        <div className="small muted" style={{ marginTop: 4 }}>
+          {s.kind === 'brief' ? 'Reads calendar, Teams, mail and Jira, writes the day on one page.' : s.kind === 'watch' ? 'Checks your merge requests, tickets, Teams and mail; new facts become alerts on Home and a macOS notification.' : s.prompt}
+          {s.kind === 'brief' && s.prompt ? <> Focus: <i>{s.prompt}</i></> : null}
+          {s.project_dir ? <> · <span className="mono">{s.project_dir}</span></> : null}
+        </div>
+        <div className="small" style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <span className="muted">Next</span><b>{s.enabled && s.next_run_at ? fmtTime(s.next_run_at) : '—'}</b>
+          <span className="muted">· Last</span>
+          {s.last_run_at ? <b>{fmtTime(s.last_run_at)}</b> : <span className="muted">never</span>}
+          {s.kind !== 'watch' && lastLate !== null && lastLate > 5 && <span className="pill stuck" title="Alfred was not running at the scheduled time; the job ran when the supervisor came back, inside the grace window">late by {lastLate} min</span>}
+          {s.kind !== 'watch' && lastLate !== null && lastLate <= 5 && <span className="pill done">on time</span>}
+        </div>
+        {s.runs.length > 0 && (
+          <div className="runs">
+            {s.runs.map((r) => {
+              const late = lateness(r, s)
+              return <a key={r.id} className={`run ${r.status}`} href={r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`} onClick={(e) => { e.preventDefault(); nav(r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`) }}
+                title={`${fmtTime(r.created_at)} · ${r.status}${late ? ` · ${late} min late` : ''}`}><span className="d" /> <span>{new Date(r.created_at * 1000).toLocaleDateString(undefined, { weekday: 'short' })} {new Date(r.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span className="muted">{r.status === 'done' ? (s.kind === 'brief' ? 'brief' : s.kind === 'watch' ? 'checked' : 'answer') : r.status}</span></a>
+            })}
+          </div>
+        )}
+        {edit && (
+          <div className="sched-edit">
+            <div className="grid cols-2" style={{ gap: 8 }}>
+              <input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
+              <div style={{ display: 'flex', gap: 8 }}>
+                <select value={d.role} onChange={(e) => setD({ ...d, role: e.target.value })}>{meta.roles.map((r) => <option key={r}>{r}</option>)}</select>
+                {s.kind === 'watch'
+                  ? <><input type="number" min={5} step={5} value={d.every_min} onChange={(e) => setD({ ...d, every_min: Number(e.target.value) })} style={{ width: 70 }} title="every N minutes" /><input type="time" value={d.active_from} onChange={(e) => setD({ ...d, active_from: e.target.value })} style={{ width: 110 }} /><input type="time" value={d.active_to} onChange={(e) => setD({ ...d, active_to: e.target.value })} style={{ width: 110 }} /></>
+                  : <input type="time" value={d.at_time} onChange={(e) => setD({ ...d, at_time: e.target.value })} style={{ width: 120 }} />}
+              </div>
+            </div>
+            <DayPicker value={d.days} onChange={(days) => setD({ ...d, days })} />
+            <textarea value={d.prompt} onChange={(e) => setD({ ...d, prompt: e.target.value })} style={{ minHeight: 60 }} placeholder={s.kind === 'brief' ? 'optional extra focus' : 'the question'} />
+            <div><button disabled={busy !== null || d.days.length === 0} onClick={() => act('save', async () => { await api.updateSchedule(s.id, { name: d.name.trim(), role: d.role, at_time: d.at_time, days: d.days.join(','), prompt: d.prompt, ...(s.kind === 'watch' ? { every_min: d.every_min, active_from: d.active_from, active_to: d.active_to } : {}) }); setEdit(false) })}>Save</button></div>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+export default function SchedulesPage() {
+  const [meta, setMeta] = useState<Meta | null>(null)
   const [draft, setDraft] = useState<Draft>(emptyDraft())
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [name, setName] = useState('')
-  const load = () => api.schedules().then((d) => { setData(d); setName(d.me_name) }).catch((e) => setErr(String(e)))
+  const [gl, setGl] = useState('')
+  const [settings, setSettings] = useState<Record<string, string | null>>({})
+  const load = () => Promise.all([api.schedules(), api.settings()]).then(([d, st]) => { setMeta(d as Meta); setName(d.me_name); setSettings(st); setGl(st.gitlab_username ?? '') }).catch((e) => setErr(String(e)))
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t) }, [])
-
   const act = async (label: string, fn: () => Promise<unknown>) => { setBusy(label); setErr(null); try { await fn(); await load() } catch (e) { setErr(String(e)) } finally { setBusy(null) } }
 
   return (
     <>
-      <h1>Schedules</h1>
-      <p className="muted small">Recurring jobs the supervisor fires at a set time on chosen days, while <span className="mono">run_all.sh</span> is running. If the laptop was asleep, a job still runs up to three hours late, once. A <b>brief</b> is the daily personal summary (calendar, Teams, mail, Jira) shown on Home and printable as PDF. A <b>prompt</b> is any question sent to a role, answered in a new chat. Each run is a normal chain: transcript, cost, memory proposals.</p>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, flexWrap: 'wrap' }}>
+        <h1>Schedules</h1>
+        {meta && <span className="muted small">local time {meta.tz.now} · {meta.tz.name} ({meta.tz.abbr}, {meta.tz.offset}) · all times below are local</span>}
+        <span style={{ marginLeft: 'auto' }}><button onClick={() => setAdding(!adding)}>{adding ? 'Cancel' : '+ New schedule'}</button></span>
+      </div>
       {err && <p className="err">{err}</p>}
+
+      {meta && !meta.supervisor_alive && (
+        <div className="card" style={{ borderColor: 'var(--warn)', marginBottom: 12 }}>
+          <b style={{ color: 'var(--warn)' }}>Alfred is not running, so nothing will fire.</b>
+          <div className="small muted" style={{ marginTop: 4 }}>Schedules are checked by the supervisor started by <span className="mono">./run_all.sh</span>. To make Alfred start at login and stay up, run <span className="mono">./alfred-autostart.sh install</span> once. A job due while the Mac was asleep or Alfred was down runs when it comes back, up to three hours late, once.</div>
+        </div>
+      )}
 
       <div className="card" style={{ marginBottom: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
         <span className="small">The brief addresses you as</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: 160 }} />
-        <button className="secondary" disabled={busy !== null || !name.trim() || name === data?.me_name} onClick={() => act('name', () => api.setMeName(name.trim()))}>Save</button>
-        <span style={{ marginLeft: 'auto' }}><button onClick={() => setAdding(!adding)}>{adding ? 'Cancel' : '+ New schedule'}</button></span>
+        <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: 150 }} />
+        <button className="secondary" disabled={busy !== null || !name.trim() || name === meta?.me_name} onClick={() => act('name', () => api.setMeName(name.trim()))}>Save</button>
+        <span className="small" style={{ marginLeft: 12 }}>GitLab username</span>
+        <input value={gl} onChange={(e) => setGl(e.target.value)} style={{ width: 170 }} className="mono" placeholder="for 'my merge requests'" />
+        <button className="secondary" disabled={busy !== null || gl === (settings.gitlab_username ?? '')} onClick={() => act('gl', () => api.setSetting('gitlab_username', gl.trim()))}>Save</button>
+        <span className="small muted" style={{ marginLeft: 'auto' }}>Runs land in a chat like any question.</span>
       </div>
 
       {adding && (
@@ -46,48 +144,31 @@ export default function SchedulesPage() {
           <div className="grid cols-2" style={{ gap: 10 }}>
             <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="name" />
             <div style={{ display: 'flex', gap: 8 }}>
-              <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as Draft['kind'], role: e.target.value === 'brief' ? 'briefer' : 'team_lead' })} style={{ width: 150 }}>
-                <option value="brief">daily brief</option><option value="prompt">prompt</option>
+              <select value={draft.kind} onChange={(e) => { const k = e.target.value as Draft['kind']; setDraft({ ...draft, kind: k, role: k === 'brief' ? 'briefer' : k === 'watch' ? 'watcher' : 'team_lead', name: k === 'watch' && draft.name === 'Morning brief' ? 'Watcher' : draft.name }) }} style={{ width: 150 }}>
+                <option value="brief">daily brief</option><option value="watch">watcher (interval)</option><option value="prompt">prompt</option>
               </select>
-              <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })}>{(data?.roles ?? []).map((r) => <option key={r}>{r}</option>)}</select>
-              <input type="time" value={draft.at_time} onChange={(e) => setDraft({ ...draft, at_time: e.target.value })} style={{ width: 120 }} />
+              <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })}>{(meta?.roles ?? []).map((r) => <option key={r}>{r}</option>)}</select>
+              {draft.kind === 'watch'
+                ? <><span className="small muted" style={{ alignSelf: 'center' }}>every</span><input type="number" min={5} step={5} value={draft.every_min} onChange={(e) => setDraft({ ...draft, every_min: Number(e.target.value) })} style={{ width: 70 }} /><span className="small muted" style={{ alignSelf: 'center' }}>min,</span>
+                   <input type="time" value={draft.active_from} onChange={(e) => setDraft({ ...draft, active_from: e.target.value })} style={{ width: 110 }} /><span className="small muted" style={{ alignSelf: 'center' }}>–</span><input type="time" value={draft.active_to} onChange={(e) => setDraft({ ...draft, active_to: e.target.value })} style={{ width: 110 }} /></>
+                : <input type="time" value={draft.at_time} onChange={(e) => setDraft({ ...draft, at_time: e.target.value })} style={{ width: 120 }} />}
             </div>
           </div>
           <DayPicker value={draft.days} onChange={(days) => setDraft({ ...draft, days })} />
           <textarea value={draft.prompt} onChange={(e) => setDraft({ ...draft, prompt: e.target.value })} style={{ minHeight: 70 }}
-            placeholder={draft.kind === 'brief' ? 'optional extra focus for the brief, e.g. "watch the 2FA epic and anything from Zeynep"' : 'the question to ask, e.g. "Which of my open MRs have a red pipeline this morning, and why?"'} />
+            placeholder={draft.kind === 'brief' ? 'optional extra focus for the brief, e.g. "watch the 2FA epic and anything from Zeynep"' : draft.kind === 'watch' ? 'optional extra focus, e.g. "also watch pipelines on excite/applications/session-proxy master"' : 'the question to ask, e.g. "Which of my open MRs have a red pipeline this morning, and why?"'} />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input className="mono" value={draft.project_dir} onChange={(e) => setDraft({ ...draft, project_dir: e.target.value })} placeholder="repository path (optional, for prompts about local code)" />
             <button disabled={busy !== null || !draft.name.trim() || draft.days.length === 0 || (draft.kind === 'prompt' && !draft.prompt.trim())}
-              onClick={() => act('create', async () => { await api.createSchedule({ ...draft, project_dir: draft.project_dir || null, days: draft.days.join(',') }); setAdding(false); setDraft(emptyDraft()) })}>Create</button>
+              onClick={() => act('create', async () => { await api.createSchedule({ ...draft, project_dir: draft.project_dir || null, days: draft.days.join(','), every_min: draft.kind === 'watch' ? draft.every_min : null, active_from: draft.kind === 'watch' ? draft.active_from : null, active_to: draft.kind === 'watch' ? draft.active_to : null }); setAdding(false); setDraft(emptyDraft()) })}>Create</button>
           </div>
         </div>
       )}
 
-      {data?.schedules.length === 0 && <div className="card muted small">No schedules yet. Start with a morning brief: 08:00, Monday to Friday.</div>}
-      {data?.schedules.map((s) => (
-        <div key={s.id} className="card" style={{ marginBottom: 10, opacity: s.enabled ? 1 : 0.6 }}>
-          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-            <b>{s.name}</b>
-            <span className={`pill ${s.kind === 'brief' ? 'answered' : ''}`}>{s.kind}</span>
-            <span className={`pill ${s.role}`}>{s.role}</span>
-            <span className="mono small">{s.at_time}</span>
-            <span className="small muted">{s.days.split(',').filter(Boolean).map((d) => DAYS[Number(d)]).join(' ')}</span>
-            <span className="small muted">· next {s.enabled && s.next_run_at ? fmtTime(s.next_run_at) : '—'}{s.last_run_at ? ` · last ${ago(s.last_run_at)}` : ''}</span>
-            <span className="actions" style={{ marginLeft: 'auto' }}>
-              <button className="btn-link" disabled={busy !== null} onClick={() => act('run', async () => { const r = await api.runSchedule(s.id); nav(`/ask/${r.conversation_id}`) })}>▶ run now</button>
-              <button className="btn-link" disabled={busy !== null} onClick={() => act('toggle', () => api.updateSchedule(s.id, { enabled: !s.enabled }))}>{s.enabled ? 'pause' : 'enable'}</button>
-              <button className="btn-link" disabled={busy !== null} onClick={() => act('delete', () => api.deleteSchedule(s.id))}>delete</button>
-            </span>
-          </div>
-          {s.prompt && <div className="small muted" style={{ marginTop: 4 }}>{s.prompt}</div>}
-          {s.runs.length > 0 && (
-            <div className="small" style={{ marginTop: 8, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
-              {s.runs.map((r) => <a key={r.id} href={r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`} onClick={(e) => { e.preventDefault(); nav(r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`) }}><span className={`pill ${r.status}`}>{r.status}</span> {fmtTime(r.created_at)}</a>)}
-            </div>
-          )}
-        </div>
-      ))}
+      {meta?.schedules.length === 0 && <div className="card muted small">No schedules yet. Start with a morning brief: 08:00, Monday to Friday.</div>}
+      {meta?.schedules.map((s) => <ScheduleCard key={s.id} s={s} meta={meta} busy={busy} act={act} />)}
+
+      <p className="muted small" style={{ marginTop: 18 }}>Ideas: an evening "what changed today, what is tomorrow" brief at 17:30 · a Monday prompt "which of my MRs are waiting on reviewers" · a prompt to the team lead every morning "any red pipelines on my projects?"</p>
     </>
   )
 }

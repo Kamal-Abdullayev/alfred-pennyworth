@@ -445,7 +445,10 @@ def create_job(job: JobIn):
         return {"task_id": None, "chain_id": None, "conversation_id": cid, "remembered": entry}
     if not cid:
         cid = board.create_conversation(job.title or question, project_dir)
-    body = question + _conversation_context(cid)
+    # When the lead can continue its previous session for this chat, the history is already there;
+    # inject the last answers only when a fresh run is expected (old chat, long chat, repo changed).
+    cwd = project_dir or str(__import__("runner").WORKSPACE)
+    body = question if board.resumable_session(cid, cwd) else question + _conversation_context(cid)
     task_id = board.create_task(role="team_lead", title=(job.title or question)[:80], body=body,
                                 created_by="ui", project_dir=project_dir, conversation_id=cid, question=question,
                                 project_key=memory.project_key(project_dir))
@@ -473,7 +476,8 @@ def conversation(cid: str):
                       "kind": _kind(root), "created_at": t["created_at"], "finished_at": t["finished_at"],
                       "cost_usd": costs.get(t["chain_id"], 0.0), "structured": root["structured"], "result": t.get("result"),
                       # the runner snapshots the canvas whenever the agent used excalidraw tools
-                      "drew": any(a["name"].endswith(".excalidraw") for a in _task_assets(t["id"]))})
+                      "drew": any(a["name"].endswith(".excalidraw") for a in _task_assets(t["id"])),
+                      "resumed": bool(t.get("resumed"))})
     return {**c, "turns": turns}
 
 
@@ -908,7 +912,8 @@ async def me_calendar(refresh: bool = False):
     if not board.get_connector("claude_ai_Microsoft_365"):
         return {"error": "Microsoft 365 is not among your Claude account connectors (Connectors → Discover)", "meetings": [], "day": today, "at": time.time()}
     try:
-        r = await conn.calendar_today(time.strftime("%Z"))
+        tz = __import__("schedules").local_tz()
+        r = await conn.calendar_today(f"{tz['name']} ({tz['abbr']}, {tz['offset']})")
     except Exception as e:  # noqa: BLE001
         return {**(cached or {}), "error": str(e)[:300], "meetings": (cached or {}).get("meetings", []), "day": today, "at": (cached or {}).get("at", time.time())}
     data = r["data"]
@@ -966,6 +971,8 @@ def home():
         "conversations": board.list_conversations(limit=6),
         "me_name": __import__("schedules").me_name(),
         "brief_schedule": next((sc for sc in board.list_schedules() if sc["kind"] == "brief"), None),
+        "watch_schedule": next((sc for sc in board.list_schedules() if sc["kind"] == "watch"), None),
+        "alerts": board.list_alerts("new", 20),
     }
 
 
@@ -973,7 +980,7 @@ def home():
 
 class ScheduleIn(BaseModel):
     name: str
-    kind: str = "brief"                 # brief | prompt
+    kind: str = "brief"                 # brief | prompt | watch
     role: str = "briefer"
     prompt: str = ""
     project_dir: str | None = None
@@ -981,6 +988,9 @@ class ScheduleIn(BaseModel):
     days: str = "0,1,2,3,4"             # Mon..Fri
     enabled: bool = True
     grace_min: int = 180
+    every_min: int | None = None        # watch: run every N minutes inside the active window
+    active_from: str | None = None      # HH:MM
+    active_to: str | None = None
 
 
 class SchedulePatch(BaseModel):
@@ -993,6 +1003,9 @@ class SchedulePatch(BaseModel):
     days: str | None = None
     enabled: bool | None = None
     grace_min: int | None = None
+    every_min: int | None = None
+    active_from: str | None = None
+    active_to: str | None = None
 
 
 def _sched_view(s: dict) -> dict:
@@ -1003,8 +1016,10 @@ def _sched_view(s: dict) -> dict:
 
 @app.get("/api/schedules")
 def schedules_list():
+    import schedules as _sch
     return {"schedules": [_sched_view(s) for s in board.list_schedules()], "roles": list(daemon.configs()),
-            "me_name": __import__("schedules").me_name()}
+            "me_name": _sch.me_name(), "tz": _sch.local_tz(), "now": time.time(),
+            "supervisor_alive": len(board.workers()) > 0}
 
 
 @app.post("/api/schedules")
@@ -1017,7 +1032,12 @@ def schedules_create(s: ScheduleIn):
         raise HTTPException(400, "at_time must be HH:MM")
     if s.kind == "prompt" and not s.prompt.strip():
         raise HTTPException(400, "a prompt schedule needs the question text")
-    return _sched_view(board.create_schedule(s.name.strip(), s.kind, s.role, s.at_time, s.days, s.prompt, s.project_dir, s.enabled, s.grace_min))
+    if s.kind == "watch":
+        s.every_min = max(5, int(s.every_min or 30)); s.active_from = s.active_from or "08:00"; s.active_to = s.active_to or "19:00"
+        if s.role == "briefer":
+            s.role = "watcher"
+    return _sched_view(board.create_schedule(s.name.strip(), s.kind, s.role, s.at_time, s.days, s.prompt, s.project_dir, s.enabled, s.grace_min,
+                                             s.every_min, s.active_from, s.active_to))
 
 
 @app.patch("/api/schedules/{sid}")
@@ -1052,6 +1072,35 @@ def set_me_name(body: dict):
         raise HTTPException(400, "name is required")
     board.set_setting("me_name", name)
     return {"me_name": name}
+
+
+SETTABLE = {"me_name", "gitlab_username", "max_workers"}
+
+
+@app.put("/api/settings/{key}")
+def set_setting(key: str, body: dict):
+    if key not in SETTABLE:
+        raise HTTPException(400, f"setting {key} is not editable here")
+    val = str(body.get("value", body.get("name", ""))).strip()
+    board.set_setting(key, val)
+    return {key: val}
+
+
+@app.get("/api/settings")
+def get_settings():
+    return {k: board.get_setting(k) for k in SETTABLE}
+
+
+@app.get("/api/alerts")
+def alerts(status: str = "new", limit: int = 50):
+    return board.list_alerts(status, limit)
+
+
+@app.post("/api/alerts/dismiss")
+def alerts_dismiss(body: dict):
+    if body.get("all"):
+        return {"dismissed": board.dismiss_alert(all_=True)}
+    return {"dismissed": board.dismiss_alert(body.get("id"))}
 
 
 def _brief_of(task: dict) -> dict | None:

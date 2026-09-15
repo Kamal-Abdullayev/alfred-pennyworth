@@ -137,7 +137,7 @@ function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onSt
   const drew = !!turn.drew || live.events.some((e) => e.kind === 'tool_call' && String((e.data as Record<string, unknown>).tool ?? '').startsWith('mcp__excalidraw__'))
   const headline = running
     ? (live.status === 'open' || turn.status === 'open' ? 'waiting for the team lead to pick this up…' : 'team lead is working…')
-    : `${lead?.kind === 'answer' ? 'answered' : turn.status} · ${live.eventsLoaded ? `${steps.length} steps` : 'show what it did'}`
+    : `${lead?.kind === 'answer' ? 'answered' : turn.status} · ${live.eventsLoaded ? `${steps.length} steps` : 'show what it did'}${turn.resumed ? ' · continued the session' : ''}`
   const toggle = () => { const next = !showSteps; setShowSteps(next); if (next && !live.eventsLoaded && finished) onNeedEvents() }
   return (
     <div className="bubble assistant">

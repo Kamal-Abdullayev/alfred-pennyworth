@@ -1,8 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { api, ago, fmtCost, subscribe, type BriefLatest, type Conversation, type HomeData, type MyCalendar, type MyJira } from '../api'
+import { api, ago, fmtCost, subscribe, type BriefDoc, type BriefLatest, type Conversation, type HomeData, type MyCalendar, type MyJira } from '../api'
 import Doctor from '../components/Doctor'
-import { DayLine } from './Brief'
 
 const PROJECT_KEY = 'alfred.ask.project'
 const ROLE_COLOR: Record<string, string> = { team_lead: '#bb9af7', developer: '#7aa2f7', qa: '#9ece6a', briefer: '#e0af68' }
@@ -13,7 +12,38 @@ function elapsed(since: number | null | undefined) {
   return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
 }
 
-/** The daily brief: headline, the day as a line, time blocks, what needs you. */
+/** The daily brief as a hero: eyebrow, headline, agenda track, day blocks, what needs you. */
+const toMin = (hhmm: string) => { const [h, m] = hhmm.split(':').map(Number); return (h || 0) * 60 + (m || 0) }
+
+function AgendaTrack({ meetings }: { meetings: BriefDoc['meetings'] }) {
+  const start = 8 * 60, end = 19 * 60
+  const now = new Date(); const nowMin = now.getHours() * 60 + now.getMinutes()
+  const pct = (m: number) => `${((Math.min(Math.max(m, start), end) - start) / (end - start)) * 100}%`
+  // short meetings get a minimum visual width; anything that would overlap drops to the next row
+  const MIN = 30, LABEL = 150            // minutes of track a chip and its title label occupy
+  const placed = [...meetings].map((m) => ({ m, a: toMin(m.start), b: Math.max(toMin(m.end), toMin(m.start) + MIN) })).sort((x, y) => x.a - y.a)
+  const laneEnd: number[] = []
+  const rows = placed.map((p) => { let lane = laneEnd.findIndex((e) => e <= p.a); if (lane === -1) { lane = laneEnd.length; laneEnd.push(0) } laneEnd[lane] = p.b + LABEL; return { ...p, lane } })
+  const lanes = Math.min(3, Math.max(1, laneEnd.length))
+  return (
+    <div className="agenda">
+      <div className="track" style={{ height: 22 + lanes * 40 }}>
+        {[8, 10, 12, 14, 16, 18].map((h) => <span key={h} className="tick" style={{ left: pct(h * 60) }}><i />{h}:00</span>)}
+        {nowMin >= start && nowMin <= end && <span className="now" style={{ left: pct(nowMin) }} title="now" />}
+        {rows.map((r, i) => {
+          const realEnd = toMin(r.m.end); const past = realEnd <= nowMin, live = r.a <= nowMin && nowMin < realEnd
+          if (r.lane > 2) return null
+          return <span key={i} className={`ev ${past ? 'past' : ''} ${live ? 'live' : ''}`} style={{ left: pct(r.a), top: 12 + r.lane * 40 }} title={`${r.m.start}–${r.m.end} ${r.m.title}`}>
+            <span className="chip" style={{ width: `max(34px, calc(${pct(r.b)} - ${pct(r.a)}))` }}><b>{r.m.start}</b></span>
+            <span className="ev-t">{r.m.title}<span className="muted"> · {r.m.end}</span></span>
+          </span>
+        })}
+      </div>
+      {meetings.length === 0 && <div className="agenda-empty">No meetings today — the whole day is yours.</div>}
+    </div>
+  )
+}
+
 function BriefCard({ d }: { d: HomeData }) {
   const nav = useNavigate()
   const [b, setB] = useState<BriefLatest | null>(null)
@@ -27,39 +57,58 @@ function BriefCard({ d }: { d: HomeData }) {
     finally { setBusy(false) }
   }
   const latest = b?.latest
-  const today = new Date().toDateString()
-  const fresh = latest && new Date(latest.created_at * 1000).toDateString() === today
+  const fresh = !!latest && new Date(latest.created_at * 1000).toDateString() === new Date().toDateString()
+  const writing = !!b?.running
   return (
-    <div className="card brief-card">
-      <div className="hd">
-        <b>Your brief</b>
-        <span className="actions" style={{ alignItems: 'center' }}>
-          {latest && <span className="muted small">{fresh ? 'today' : ago(latest.created_at)} · {fmtCost(latest.cost_usd)}</span>}
-          {b?.running && <span className="pill running">writing…</span>}
-          {latest && <a className="btn-link" href={`/brief/${latest.task_id}`} target="_blank" rel="noreferrer">open · PDF</a>}
-          <button className="btn-link" disabled={busy || !!b?.running} onClick={run}>{latest ? 'refresh now' : 'write my first brief'}</button>
-          <a className="btn-link" href="/schedules" onClick={(e) => { e.preventDefault(); nav('/schedules') }}>{sched ? `daily at ${sched.at_time}` : 'schedule'}</a>
+    <section className="brief-hero">
+      <div className="eyebrow">
+        <span className="dotlbl"><i className={writing ? 'live' : ''} />{writing ? 'writing your brief…' : latest ? `Brief · ${fresh ? 'today' : ago(latest.created_at)} ${new Date(latest.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Daily brief'}</span>
+        <span className="tools">
+          {latest && <a href={`/brief/${latest.task_id}`} target="_blank" rel="noreferrer" title="full brief, printable">Open ↗</a>}
+          <button disabled={busy || writing} onClick={run} title="read calendar, Teams, mail and Jira again (about $1)">{latest ? 'Refresh' : 'Write my first brief'}</button>
+          <a href="/schedules" onClick={(e) => { e.preventDefault(); nav('/schedules') }} title="when it is written">{sched ? `${sched.enabled ? 'Daily' : 'Paused'} · ${sched.at_time}` : 'Schedule'}</a>
         </span>
       </div>
-      {!latest && !b?.running && <div className="muted small">No brief yet. One run reads your calendar, Teams, mail and Jira and writes the day in one page. Scheduled, it is waiting for you every morning.</div>}
-      {!latest && b?.running && <div className="muted small">The briefer is reading your calendar, Teams, mail and Jira…</div>}
+
+      {!latest && (
+        <div className="brief-empty">
+          <div className="h">{writing ? 'Reading your calendar, Teams, mail and Jira…' : 'Your day, on one card.'}</div>
+          <div className="muted">{writing ? 'This takes about a minute.' : 'One run reads Outlook, Teams, your inbox and Jira, and writes what matters. Scheduled, it is waiting for you every morning.'}</div>
+        </div>
+      )}
+
       {latest && (
         <>
-          <div className="brief-headline home">{latest.brief.headline}</div>
-          <DayLine meetings={latest.brief.meetings} height={72} />
-          <div className="brief-segments home" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(4, latest.brief.segments.length))}, 1fr)` }}>
-            {latest.brief.segments.map((s, i) => <div key={i}><div className="seg-title">{s.title}</div><div className="seg-text">{s.detail}</div></div>)}
+          <h2 className="headline">{latest.brief.headline}</h2>
+          <AgendaTrack meetings={latest.brief.meetings} />
+          <div className="blocks" style={{ gridTemplateColumns: `repeat(${Math.max(1, Math.min(4, latest.brief.segments.length))}, minmax(0, 1fr))` }}>
+            {latest.brief.segments.map((s, i) => <div key={i} className="block"><div className="t">{s.title}</div><div className="d">{s.detail}</div></div>)}
           </div>
-          {latest.brief.needs_attention.length > 0 && (
-            <div className="brief-needs">
-              <div className="label">Needs attention</div>
-              {latest.brief.needs_attention.map((it, i) => <div key={i} className="item"><span className="n">{i + 1}</span><div><b>{it.url ? <a href={it.url} target="_blank" rel="noreferrer">{it.title}</a> : it.title}</b><div className="small muted">{it.detail}</div></div></div>)}
+          <div className="lower">
+            <div className="needs">
+              <div className="lbl">Needs attention{latest.brief.needs_attention.length ? ` · ${latest.brief.needs_attention.length}` : ''}</div>
+              {latest.brief.needs_attention.length === 0 && <div className="muted small">Nothing needs a decision from you today.</div>}
+              {latest.brief.needs_attention.slice(0, 4).map((it, i) => (
+                <div key={i} className="need-item">
+                  <span className="idx">{i + 1}</span>
+                  <div className="body"><div className="t">{it.url ? <a href={it.url} target="_blank" rel="noreferrer">{it.title}</a> : it.title}</div><div className="s">{it.detail}</div></div>
+                </div>
+              ))}
+              {latest.brief.needs_attention.length > 4 && <a className="small" href={`/brief/${latest.task_id}`} target="_blank" rel="noreferrer">+{latest.brief.needs_attention.length - 4} more in the full brief</a>}
             </div>
-          )}
-          {!fresh && <div className="small muted" style={{ marginTop: 8 }}>This brief is from {new Date(latest.created_at * 1000).toLocaleDateString(undefined, { weekday: 'long' })}. Press refresh for today.</div>}
+            <div className="counts">
+              {[
+                { n: latest.brief.meetings.length, l: 'meetings' },
+                { n: latest.brief.tickets.length, l: 'open tickets' },
+                { n: latest.brief.unread_emails.reduce((a, e) => a + (e.count || 1), 0), l: 'unread mails' },
+                { n: latest.brief.resolved.length, l: 'resolved' },
+              ].map((c) => <a key={c.l} className="count" href={`/brief/${latest.task_id}`} target="_blank" rel="noreferrer"><b>{c.n}</b><span>{c.l}</span></a>)}
+              {!fresh && <div className="stale small">From {new Date(latest.created_at * 1000).toLocaleDateString(undefined, { weekday: 'long' })}. Refresh for today.</div>}
+            </div>
+          </div>
         </>
       )}
-    </div>
+    </section>
   )
 }
 
@@ -195,6 +244,38 @@ function Jira() {
   )
 }
 
+/** What the watcher found since you last looked: red pipelines, review comments, mentions. */
+function Alerts({ d, reload }: { d: HomeData; reload: () => void }) {
+  const nav = useNavigate()
+  const [busy, setBusy] = useState<string | null>(null)
+  const dismiss = async (id?: string) => { setBusy(id ?? 'all'); try { await api.dismissAlert(id); reload() } finally { setBusy(null) } }
+  const ws = d.watch_schedule
+  return (
+    <div className="card alerts">
+      <div className="hd">
+        <b>Alerts{d.alerts.length ? ` · ${d.alerts.length}` : ''}</b>
+        <span className="actions" style={{ alignItems: 'center' }}>
+          <span className="muted small">{ws ? (ws.enabled ? `watching every ${ws.every_min} min` : 'watcher paused') : 'no watcher yet'}</span>
+          {d.alerts.length > 0 && <button className="btn-link" disabled={busy !== null} onClick={() => dismiss()}>clear all</button>}
+          <a className="btn-link" href="/schedules" onClick={(e) => { e.preventDefault(); nav('/schedules') }}>{ws ? 'settings' : 'set up'}</a>
+        </span>
+      </div>
+      {d.alerts.length === 0 && <div className="muted small">{ws ? 'Nothing new since the last check.' : 'A watcher checks your merge requests, tickets, Teams and mail every half hour and tells you what changed. Set one up on the Schedules page.'}</div>}
+      {d.alerts.map((a) => (
+        <div key={a.id} className={`alert ${a.severity}`}>
+          <span className="sev" />
+          <div className="body">
+            <div className="t">{a.url ? <a href={a.url} target="_blank" rel="noreferrer">{a.title}</a> : a.title}</div>
+            <div className="s">{a.detail}</div>
+            <div className="m muted">{a.source} · {ago(a.created_at)}{a.chain_id ? <> · <a href={`/chains/${a.chain_id}`} onClick={(e) => { e.preventDefault(); nav(`/chains/${a.chain_id}`) }}>how it was found</a></> : null}</div>
+          </div>
+          <button className="btn-link tiny" title="dismiss" disabled={busy !== null} onClick={() => dismiss(a.id)}>✕</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function NeedsYou({ d }: { d: HomeData }) {
   const nav = useNavigate()
   const items = [
@@ -274,6 +355,7 @@ export default function Home() {
               <Recent d={d} />
             </div>
             <aside className="side">
+              <Alerts d={d} reload={load} />
               <Meetings />
               <Jira />
               <NeedsYou d={d} />

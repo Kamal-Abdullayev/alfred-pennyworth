@@ -432,7 +432,8 @@ async def calendar_today(timezone_hint: str = "") -> dict:
     )
     result = None
     async with ClaudeSDKClient(options=opts) as client:
-        await client.query(f"List every meeting on my calendar for today, {today}{(' (' + timezone_hint + ')') if timezone_hint else ''}. "
+        await client.query(f"List every meeting on my calendar for today, {today}. The user's time zone is {timezone_hint or 'the machine local zone'}; "
+                           f"the calendar tool returns UTC — convert every start/end to that zone before answering. "
                            f"Include start, end, title, location or join link, organizer, attendee count and my response status.")
         async for msg in client.receive_response():
             if isinstance(msg, ResultMessage):

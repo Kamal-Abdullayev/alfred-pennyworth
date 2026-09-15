@@ -66,10 +66,12 @@ export type HomeData = {
   conversations: Conversation[]
   me_name: string
   brief_schedule: Schedule | null
+  watch_schedule: Schedule | null
+  alerts: Alert[]
 }
 export type MyJira = { issues: { key: string; status: string; type: string; priority: string; assignee: string; summary: string; url: string | null }[]; error?: string; at: number; stale?: boolean }
 export type MyCalendar = { day: string; meetings: { start: string; end: string; title: string; location: string | null; join_url: string | null; organizer: string | null; attendees: number; response: string | null }[]; note?: string | null; error?: string; at: number; stale?: boolean; cost_usd?: number }
-export type Schedule = { id: string; name: string; kind: 'brief' | 'prompt'; role: string; prompt: string; project_dir: string | null; at_time: string; days: string; enabled: number; grace_min: number; last_run_at: number | null; last_task: string | null; next_run_at: number | null; runs: { id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; role: string }[] }
+export type Schedule = { id: string; name: string; kind: 'brief' | 'prompt' | 'watch'; role: string; prompt: string; project_dir: string | null; at_time: string; days: string; enabled: number; grace_min: number; every_min: number | null; active_from: string | null; active_to: string | null; last_run_at: number | null; last_task: string | null; next_run_at: number | null; runs: { id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; role: string }[] }
 export type BriefItem = { title: string; detail: string; url: string | null }
 export type BriefDoc = { date: string; headline: string; segments: BriefItem[]; needs_attention: BriefItem[]; resolved: BriefItem[]
   meetings: { start: string; end: string; title: string; where: string | null; note: string | null }[]
@@ -77,6 +79,7 @@ export type BriefDoc = { date: string; headline: string; segments: BriefItem[]; 
   unread_emails: { sender: string; subject: string; when: string; count: number }[]; footer: string | null }
 export type BriefRun = { task_id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; cost_usd: number; brief: BriefDoc }
 export type BriefLatest = { latest: BriefRun | null; running: { id: string; chain_id: string; status: string; created_at: number } | null }
+export type Alert = { id: string; key: string; severity: 'info' | 'warn' | 'urgent'; title: string; detail: string; url: string | null; source: string | null; chain_id: string | null; status: string; created_at: number }
 export type TaskNote = { id: number; task_id: string; chain_id: string; role: string; note: string; created_at: number }
 
 /** Older rows stored a bare Plan; normalise everything to LeadOutput. */
@@ -114,7 +117,7 @@ export type TranscriptEvent = { ts: string; kind: string; data: Record<string, u
 export type Transcript = { task_id: string; source: string | null; count: number; kinds: Record<string, number>; events: TranscriptEvent[] }
 export type LogFile = { name: string; bytes: number; mtime: number }
 export type Conversation = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: number; cost_usd: number; last_status: string | null }
-export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null; drew?: boolean }
+export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null; drew?: boolean; resumed?: boolean }
 export type ConversationDetail = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: ConversationTurn[] }
 export type Connector = {
   name: string; template: string | null; kind: 'stdio' | 'http' | 'sse' | 'claude-ai'; command: string | null; args: string[]; url: string | null
@@ -173,10 +176,14 @@ export const api = {
     j<{ task_id: string | null; chain_id: string | null; conversation_id: string | null; remembered?: Memory }>('/api/jobs', { method: 'POST', body: JSON.stringify({ body, project_dir: project_dir || null, conversation_id: conversation_id || null }) }),
   home: () => j<HomeData>('/api/home'),
   schedules: () => j<{ schedules: Schedule[]; roles: string[]; me_name: string }>('/api/schedules'),
-  createSchedule: (s: { name: string; kind: string; role: string; prompt: string; project_dir: string | null; at_time: string; days: string }) => j<Schedule>('/api/schedules', { method: 'POST', body: JSON.stringify(s) }),
-  updateSchedule: (id: string, p: Partial<{ name: string; enabled: boolean; at_time: string; days: string; prompt: string; role: string }>) => j<Schedule>(`/api/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
+  createSchedule: (s: { name: string; kind: string; role: string; prompt: string; project_dir: string | null; at_time: string; days: string; every_min?: number | null; active_from?: string | null; active_to?: string | null }) => j<Schedule>('/api/schedules', { method: 'POST', body: JSON.stringify(s) }),
+  updateSchedule: (id: string, p: Partial<{ name: string; enabled: boolean; at_time: string; days: string; prompt: string; role: string; every_min: number; active_from: string; active_to: string }>) => j<Schedule>(`/api/schedules/${id}`, { method: 'PATCH', body: JSON.stringify(p) }),
   deleteSchedule: (id: string) => j<{ deleted: string }>(`/api/schedules/${id}`, { method: 'DELETE' }),
   runSchedule: (id: string) => j<{ task_id: string; chain_id: string; conversation_id: string }>(`/api/schedules/${id}/run`, { method: 'POST' }),
+  alerts: () => j<Alert[]>('/api/alerts'),
+  dismissAlert: (id?: string) => j<{ dismissed: number }>('/api/alerts/dismiss', { method: 'POST', body: JSON.stringify(id ? { id } : { all: true }) }),
+  settings: () => j<Record<string, string | null>>('/api/settings'),
+  setSetting: (key: string, value: string) => j<Record<string, string>>(`/api/settings/${key}`, { method: 'PUT', body: JSON.stringify({ value }) }),
   setMeName: (name: string) => j<{ me_name: string }>('/api/settings/me_name', { method: 'PUT', body: JSON.stringify({ name }) }),
   briefLatest: () => j<BriefLatest>('/api/briefs/latest'),
   brief: (taskId: string) => j<BriefRun>(`/api/briefs/${taskId}`),

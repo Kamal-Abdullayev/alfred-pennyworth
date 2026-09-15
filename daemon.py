@@ -25,7 +25,7 @@ from pathlib import Path
 import board
 import memory
 import worktree
-from runner import run_agent
+from runner import run_agent, WORKSPACE
 
 POLL_SECONDS = 10
 
@@ -36,6 +36,38 @@ AGENTS_DIR = ROOT / "agents"
 def configs() -> dict[str, str]:
     """Roles are data: every agents/<role>.yaml is a role. Add a file, get a role."""
     return {p.stem: f"agents/{p.name}" for p in sorted(AGENTS_DIR.glob("*.yaml"))}
+
+
+def notify(title: str, text: str, url: str | None = None) -> None:
+    """A macOS notification for a new alert (no-op elsewhere). With terminal-notifier installed
+    (brew install terminal-notifier) a click opens Alfred; the osascript fallback is credited to
+    Script Editor by macOS and opens that instead — so prefer the former."""
+    import shutil, subprocess, sys as _sys
+    if _sys.platform != "darwin":
+        return
+    url = url or "http://127.0.0.1:8787/"
+    tn = shutil.which("terminal-notifier") or ("/opt/homebrew/bin/terminal-notifier" if Path("/opt/homebrew/bin/terminal-notifier").exists() else None)
+    try:
+        if tn:
+            r = subprocess.run([tn, "-title", str(title)[:80], "-message", str(text)[:240], "-open", url, "-group", "alfred", "-sound", "Glass"],
+                               capture_output=True, text=True, timeout=5)
+            try:
+                board.set_setting("notify_status", json.dumps({"ok": r.returncode == 0, "at": time.time(), "code": r.returncode}))
+            except Exception:
+                pass
+            if r.returncode == 0:
+                return
+            # exit 3 = "Notifications are turned off for this application": fall through to osascript so the
+            # alert is not lost, and say so once in the flow log
+            if not getattr(notify, "_warned", False):
+                notify._warned = True
+                flow("[notify] terminal-notifier is blocked by macOS — using the Script Editor fallback. Allow it in "
+                     "System Settings → Notifications → terminal-notifier, or run: tccutil reset UserNotification fr.julienxx.oss.terminal-notifier")
+        esc = lambda x: str(x).replace("\\", "\\\\").replace('"', '\\"')[:200]
+        subprocess.run(["osascript", "-e", f'display notification "{esc(text)}" with title "{esc(title)}" sound name "Glass"'],
+                       capture_output=True, timeout=5)
+    except Exception:
+        pass
 
 
 def role_contract(role: str) -> str | None:
@@ -209,6 +241,14 @@ def handoff(role, task, res) -> str:
                 f"parallelism={plan.get('parallelism')} — {where}")
 
     # ---------------------------------------------------------- developer --
+    if role_contract(role) == "watch":
+        items = structured.get("items") or []
+        new = board.add_alerts(items, chain_id=chain)
+        for a in new:
+            # click → the alert's own link when it has one, else Alfred's Home
+            notify(f"Alfred · {a.get('severity', 'info')}", a.get("title", ""), a.get("url") or "http://127.0.0.1:8787/")
+        return f"WATCHED for chain {chain}: {len(items)} item(s) seen, {len(new)} new alert(s)"
+
     if role_contract(role) in ("brief", "answer"):   # reporting roles: the structured output IS the result
         return f"REPORTED {role_contract(role)} for chain {chain}: {len(json.dumps(structured))} chars"
 
@@ -327,14 +367,33 @@ async def main(role, ephemeral=False, idle_exit_s=90):
                         except Exception:
                             pass
                 hb = asyncio.create_task(heartbeat())
+                meta = {"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"],
+                        "project_key": task.get("project_key") or memory.project_key(task.get("project_dir"))}
+                # Follow-up in a chat: continue the lead's previous Claude session instead of re-reading
+                # everything. Falls back to a fresh run (with the last answers injected) if resume fails.
+                cwd = task.get("project_dir") or str(WORKSPACE)
+                resume = board.resumable_session(task.get("conversation_id"), cwd) if role == "team_lead" and task.get("conversation_id") else None
                 try:
-                    res = await run_agent(
-                        cfgs[role], prompt, task.get("project_dir"),
-                        meta={"id": task["id"], "chain_id": task["chain_id"], "iteration": task["iteration"],
-                              "project_key": task.get("project_key") or memory.project_key(task.get("project_dir"))},
-                    )
+                    res, why = None, None
+                    try:
+                        res = await run_agent(cfgs[role], prompt, task.get("project_dir"), meta=meta, resume=resume)
+                        if resume and (res.get("is_error") or res.get("subtype") not in (None, "success")) and not res.get("cancelled"):
+                            why = res.get("subtype")
+                    except Exception as e:  # noqa: BLE001 — a missing/expired session raises at connect time
+                        if not resume:
+                            raise
+                        why = repr(e)[:120]
+                    if why is not None:
+                        flow(f"[{role}] resume of session {resume[:8]} failed ({why}); running fresh with the last answers as context")
+                        board.set_conversation_session(task["conversation_id"], None, None, False)
+                        prompt_fresh = prompt + board.conversation_context(task["conversation_id"])
+                        res = await run_agent(cfgs[role], prompt_fresh, task.get("project_dir"), meta=meta, resume=None)
+                        res["resumed"] = False
                 finally:
                     hb.cancel()
+                if res.get("session_id") and task.get("conversation_id") and role == "team_lead":
+                    board.set_conversation_session(task["conversation_id"], res["session_id"], cwd, res.get("resumed"))
+                    board.set_task_session(task["id"], res["session_id"], res.get("resumed"))
                 record_usage(task, role, res)
                 if res.get("cancelled"):
                     board.cancel_task(task["id"])
@@ -359,7 +418,8 @@ async def main(role, ephemeral=False, idle_exit_s=90):
                     continue
                 outcome = handoff(role, task, res)
                 denied = f"  (denied tools: {sorted(set(res['denied']))})" if res.get("denied") else ""
-                flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f} — {outcome}{denied}")
+                cont = " (continued session)" if res.get("resumed") else ""
+                flow(f"[{role}] FINISHED {task['id']} est≈${res.get('cost_usd', 0):.4f}{cont} — {outcome}{denied}")
             except Exception as e:
                 err = traceback.format_exc()
                 board.fail(task["id"], err[-2000:])
