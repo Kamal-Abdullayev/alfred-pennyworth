@@ -244,6 +244,38 @@ function Jira() {
   )
 }
 
+/** What the watcher found since you last looked: red pipelines, review comments, mentions. */
+function Alerts({ d, reload }: { d: HomeData; reload: () => void }) {
+  const nav = useNavigate()
+  const [busy, setBusy] = useState<string | null>(null)
+  const dismiss = async (id?: string) => { setBusy(id ?? 'all'); try { await api.dismissAlert(id); reload() } finally { setBusy(null) } }
+  const ws = d.watch_schedule
+  return (
+    <div className="card alerts">
+      <div className="hd">
+        <b>Alerts{d.alerts.length ? ` · ${d.alerts.length}` : ''}</b>
+        <span className="actions" style={{ alignItems: 'center' }}>
+          <span className="muted small">{ws ? (ws.enabled ? `watching every ${ws.every_min} min` : 'watcher paused') : 'no watcher yet'}</span>
+          {d.alerts.length > 0 && <button className="btn-link" disabled={busy !== null} onClick={() => dismiss()}>clear all</button>}
+          <a className="btn-link" href="/schedules" onClick={(e) => { e.preventDefault(); nav('/schedules') }}>{ws ? 'settings' : 'set up'}</a>
+        </span>
+      </div>
+      {d.alerts.length === 0 && <div className="muted small">{ws ? 'Nothing new since the last check.' : 'A watcher checks your merge requests, tickets, Teams and mail every half hour and tells you what changed. Set one up on the Schedules page.'}</div>}
+      {d.alerts.map((a) => (
+        <div key={a.id} className={`alert ${a.severity}`}>
+          <span className="sev" />
+          <div className="body">
+            <div className="t">{a.url ? <a href={a.url} target="_blank" rel="noreferrer">{a.title}</a> : a.title}</div>
+            <div className="s">{a.detail}</div>
+            <div className="m muted">{a.source} · {ago(a.created_at)}{a.chain_id ? <> · <a href={`/chains/${a.chain_id}`} onClick={(e) => { e.preventDefault(); nav(`/chains/${a.chain_id}`) }}>how it was found</a></> : null}</div>
+          </div>
+          <button className="btn-link tiny" title="dismiss" disabled={busy !== null} onClick={() => dismiss(a.id)}>✕</button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function NeedsYou({ d }: { d: HomeData }) {
   const nav = useNavigate()
   const items = [
@@ -323,6 +355,7 @@ export default function Home() {
               <Recent d={d} />
             </div>
             <aside className="side">
+              <Alerts d={d} reload={load} />
               <Meetings />
               <Jira />
               <NeedsYou d={d} />

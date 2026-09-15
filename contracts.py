@@ -174,8 +174,25 @@ class Brief(BaseModel):
     footer: str | None = Field(description="One sentence on scope: what period was read, what was left out — or null")
 
 
+class WatchItem(BaseModel):
+    key: str = Field(description="Stable id for de-duplication: '<source>:<object>:<what>[:<value>]', e.g. 'gitlab:mr:701:pipeline:failed', 'gitlab:mr:701:comment:98213', 'jira:GTECH-1325570:status:In Review', 'teams:chat:Zeynep:mention:2026-09-14T10:02'")
+    source: Literal["gitlab", "jira", "teams", "mail", "board"]
+    severity: Literal["info", "warn", "urgent"] = Field(description="urgent: blocks you or someone waits on you now; warn: needs a look today; info: good to know")
+    title: str = Field(description="One line, specific, with the ticket/MR key")
+    detail: str = Field(description="One to three sentences: what happened, who, when, and the likely cause when visible (e.g. the failing job and its last error line)")
+    url: str | None
+
+
+class WatchReport(BaseModel):
+    """What changed since the last check that the person should know about. Empty lists are the normal outcome."""
+    items: list[WatchItem]
+    checked: list[str] = Field(description="What you looked at, one short line each, e.g. 'GitLab: 3 open MRs by kamal.abdullayev in session-proxy'")
+    note: str | None = Field(description="Sources you could not read, or null")
+
+
 CONTRACTS: dict[str, type[BaseModel]] = {
     "brief": Brief,
+    "watch": WatchReport,
     "lead": LeadOutput,
     "plan": Plan,
     "implement": Implement,

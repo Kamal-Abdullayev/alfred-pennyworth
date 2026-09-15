@@ -123,6 +123,30 @@ def run_checks() -> list[dict]:
         out.append(check("excalidraw canvas", canvas_up, "http://localhost:3000 answering" if canvas_up else "nothing on :3000 — the lead cannot draw on the shared canvas",
                          required=False, fix="docker compose -f excalidraw/docker-compose.yml up -d"))
 
+    # --- Optional: clickable notifications ---------------------------------------
+    if sys.platform == "darwin":
+        tn = shutil.which("terminal-notifier") or (Path("/opt/homebrew/bin/terminal-notifier").exists() and "/opt/homebrew/bin/terminal-notifier")
+        if not tn:
+            out.append(check("notifications", False, "terminal-notifier missing — notifications fall back to osascript (click opens Script Editor)",
+                             required=False, fix="brew install terminal-notifier"))
+        else:
+            # Never post a notification from a check (the doctor runs on every Home load). The daemon records
+            # how its last real notification went; report that.
+            status = None
+            try:
+                import board
+                status = json.loads(board.get_setting("notify_status") or "null")
+            except Exception:
+                status = None
+            if not status:
+                out.append(check("notifications", True, "terminal-notifier installed — first real alert will show whether macOS allows it", required=False))
+            else:
+                ok = status.get("ok", False)
+                out.append(check("notifications", ok,
+                                 "terminal-notifier allowed — alert notifications open Alfred when clicked" if ok
+                                 else "terminal-notifier is BLOCKED in macOS Notifications — alerts fall back to Script Editor notifications",
+                                 required=False, fix="System Settings → Notifications → terminal-notifier → Allow Notifications; launching the app once registers it: open /opt/homebrew/Cellar/terminal-notifier/*/terminal-notifier.app"))
+
     # --- Optional: IntelliJ links -------------------------------------------
     idea = any(Path(p).exists() for p in ("/Applications/IntelliJ IDEA.app", "/Applications/IntelliJ IDEA CE.app")) or bool(shutil.which("idea"))
     out.append(check("intellij", idea, "found — 'Open in IntelliJ' links work" if idea else "not found — code links fall back to GitLab", required=False))

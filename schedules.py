@@ -50,6 +50,17 @@ def due_slot(s: dict, now: float) -> float | None:
 
 
 def next_run(s: dict, now: float) -> float | None:
+    if s.get("every_min"):
+        last = s.get("last_run_at") or 0
+        cand = max(now, last + int(s["every_min"]) * 60)
+        for _ in range(0, 14 * 24 * 60, 5):           # walk forward until inside an active window
+            t = datetime.fromtimestamp(cand)
+            days = {int(d) for d in str(s["days"]).split(",") if d.strip().isdigit()}
+            cur = t.hour * 60 + t.minute
+            if t.weekday() in days and _hhmm(s.get("active_from"), "08:00") <= cur < _hhmm(s.get("active_to"), "19:00"):
+                return cand
+            cand += 300
+        return None
     try:
         hh, mm = (int(x) for x in s["at_time"].split(":"))
     except Exception:
@@ -91,6 +102,47 @@ def brief_body(s: dict, when: datetime) -> str:
             f"{focus}Write the brief as the structured output. Do not send or change anything anywhere.")
 
 
+def _hhmm(v, default):
+    try:
+        h, m = (int(x) for x in str(v or default).split(":"))
+        return h * 60 + m
+    except Exception:
+        h, m = (int(x) for x in default.split(":"))
+        return h * 60 + m
+
+
+def interval_due(s: dict, now: float) -> bool:
+    """Interval schedules (watchers): every N minutes inside the active window on the chosen days."""
+    every = int(s.get("every_min") or 0)
+    if every <= 0:
+        return False
+    t = datetime.fromtimestamp(now)
+    days = {int(d) for d in str(s["days"]).split(",") if d.strip().isdigit()}
+    if t.weekday() not in days:
+        return False
+    cur = t.hour * 60 + t.minute
+    if not (_hhmm(s.get("active_from"), "08:00") <= cur < _hhmm(s.get("active_to"), "19:00")):
+        return False
+    last = s.get("last_run_at") or 0
+    return now - last >= every * 60
+
+
+def watch_body(s: dict, when: datetime) -> str:
+    since = datetime.fromtimestamp(s["last_run_at"]) if s.get("last_run_at") else when - timedelta(hours=12)
+    tz = local_tz()
+    gl_user = board.get_setting("gitlab_username") or ""
+    known = board.recent_alert_keys(150)
+    focus = f"\nExtra focus: {s['prompt'].strip()}\n" if (s.get("prompt") or "").strip() else ""
+    return (f"WATCH for {me_name()} — now {when.strftime('%A %Y-%m-%d %H:%M')} {tz['abbr']} ({tz['offset']}); report only what changed since "
+            f"{since.strftime('%Y-%m-%d %H:%M')} local. Tools return UTC — convert.\n"
+            f"GitLab username: {gl_user or 'unknown — find my MRs by my name ' + me_name()}.\n"
+            f"Check, quickly and in this order: (1) my open merge requests: pipeline turned red or green, new review comments or approvals, "
+            f"merge conflicts; (2) Jira issues assigned to me or reported by me: status changes, new comments, blockers; "
+            f"(3) Teams chats and channels: messages that mention me or my tickets and ask for something; (4) unread mail that needs an action "
+            f"(not alerts, not newsletters). Already reported — do NOT repeat these keys: {', '.join(known) if known else '(none)'}.\n"
+            f"{focus}Answer with the structured output. No items is the normal result; never invent one.")
+
+
 def fire(s: dict, reason: str = "due") -> str:
     """Create the task for one schedule and record the run. Returns the task id."""
     when = datetime.now()
@@ -98,6 +150,8 @@ def fire(s: dict, reason: str = "due") -> str:
     cid = board.create_conversation(title, s.get("project_dir"))
     if s["kind"] == "brief":
         body, question = brief_body(s, when), f"{s['name']} for {when.strftime('%A %-d %B')}"
+    elif s["kind"] == "watch":
+        body, question = watch_body(s, when), f"{s['name']} · check at {when.strftime('%H:%M')}"
     else:
         body, question = s["prompt"], s["prompt"]
     tid = board.create_task(role=s["role"], title=title[:80], body=body, created_by=f"schedule:{s['id']}",
@@ -119,10 +173,19 @@ def tick(now: float | None = None) -> list[str]:
     for s in board.list_schedules():
         if not s.get("enabled"):
             continue
+        if s.get("every_min"):
+            if interval_due(s, now):
+                fired.append(fire(s, "interval"))
+            continue
         due = due_slot(s, now)
         if due is None:
             continue
         if s.get("last_run_at") and s["last_run_at"] >= due:
-            continue                                    # this slot already ran
+            # this slot already ran — but if that run FAILED (e.g. no network right after wake-up,
+            # API retries exhausted), give it one more try inside the grace window
+            runs = [r for r in board.schedule_runs(s["id"], limit=5) if r["created_at"] >= due]
+            if runs and len(runs) < 2 and all(r["status"] == "failed" for r in runs) and now - s["last_run_at"] >= 600:
+                fired.append(fire(s, "retry after a failed run"))
+            continue
         fired.append(fire(s, "due" if now - due < 120 else f"late by {int((now - due) / 60)} min"))
     return fired

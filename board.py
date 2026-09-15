@@ -170,6 +170,20 @@ CREATE TABLE IF NOT EXISTS connector_roles (
     role      TEXT NOT NULL,
     PRIMARY KEY (connector, role)
 );
+CREATE TABLE IF NOT EXISTS alerts (
+    id          TEXT PRIMARY KEY,
+    key         TEXT NOT NULL,             -- stable id from the watcher, e.g. mr:701:pipeline:failed
+    severity    TEXT NOT NULL,             -- info | warn | urgent
+    title       TEXT NOT NULL,
+    detail      TEXT NOT NULL,
+    url         TEXT,
+    source      TEXT,                      -- gitlab | jira | teams | mail | board
+    chain_id    TEXT,
+    status      TEXT NOT NULL DEFAULT 'new',   -- new | dismissed
+    created_at  REAL NOT NULL,
+    dismissed_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_key ON alerts(key);
 CREATE TABLE IF NOT EXISTS schedules (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -220,6 +234,8 @@ def init():
             ("question", "TEXT"),          # the human's raw question (body may carry injected context)
             ("stop_requested", "INTEGER NOT NULL DEFAULT 0"),  # human pressed Stop while it was running
             ("project_key", "TEXT"),       # memory key (git remote) when the task has no project_dir
+            ("session_id", "TEXT"),        # Claude session the run used (resumable)
+            ("resumed", "INTEGER NOT NULL DEFAULT 0"),  # 1 when the run continued an earlier session
         ):
             if name not in cols:
                 con.execute(f"ALTER TABLE tasks ADD COLUMN {name} {ddl}")
@@ -233,6 +249,14 @@ def init():
                 v = r[col]
                 if v and "/worktrees/" in v and not v.startswith(root + "/"):
                     con.execute(f"UPDATE tasks SET {col}=? WHERE id=?", (root + "/worktrees/" + v.split("/worktrees/", 1)[1], r["id"]))
+        vcols = [r["name"] for r in con.execute("PRAGMA table_info(conversations)")]
+        for name, ddl in (("last_session_id", "TEXT"), ("last_session_cwd", "TEXT"), ("last_session_at", "REAL"), ("session_turns", "INTEGER NOT NULL DEFAULT 0")):
+            if name not in vcols:
+                con.execute(f"ALTER TABLE conversations ADD COLUMN {name} {ddl}")
+        scols = [r["name"] for r in con.execute("PRAGMA table_info(schedules)")]
+        for name, ddl in (("every_min", "INTEGER"), ("active_from", "TEXT"), ("active_to", "TEXT")):
+            if scols and name not in scols:
+                con.execute(f"ALTER TABLE schedules ADD COLUMN {name} {ddl}")
         ccols = [r["name"] for r in con.execute("PRAGMA table_info(connectors)")]
         if ccols and "trust_writes" not in ccols:
             con.execute("ALTER TABLE connectors ADD COLUMN trust_writes INTEGER NOT NULL DEFAULT 0")
@@ -505,6 +529,62 @@ def set_conversation_project_dir(cid, project_dir):
                     (project_dir, time.time(), cid))
 
 
+def set_conversation_session(cid, session_id, cwd, resumed):
+    """Remember the lead's Claude session so the next question in this chat can continue it."""
+    with connect() as con:
+        con.execute("UPDATE conversations SET last_session_id=?, last_session_cwd=?, last_session_at=?, "
+                    "session_turns=CASE WHEN ? THEN session_turns+1 ELSE 1 END WHERE id=?",
+                    (session_id, cwd, time.time(), int(bool(resumed)), cid))
+
+
+def set_task_session(task_id, session_id, resumed):
+    with connect() as con:
+        con.execute("UPDATE tasks SET session_id=?, resumed=? WHERE id=?", (session_id, int(bool(resumed)), task_id))
+
+
+def turn_answer_text(root: dict) -> str | None:
+    s = root.get("structured")
+    s = json.loads(s) if isinstance(s, str) and s else s
+    if not s:
+        return None
+    if s.get("kind") == "answer" and s.get("answer"):
+        return s["answer"].get("answer")
+    plan = s.get("plan") if "plan" in s else (s if "subtasks" in s else None)
+    return plan.get("summary") if plan else None
+
+
+def conversation_context(cid: str, max_turns: int = 3, max_chars: int = 1800) -> str:
+    """Previous Q/A pairs, newest last — the fallback when a chat cannot resume its session."""
+    turns = [t for t in conversation_turns(cid) if t["status"] == "done"][-max_turns:]
+    parts = []
+    for t in turns:
+        a = turn_answer_text(t)
+        if a:
+            parts.append(f"Q: {(t.get('question') or t['body']).strip()[:600]}\nA: {a.strip()[:max_chars]}")
+    if not parts:
+        return ""
+    return ("\n\n--- Conversation so far (context only — answer the latest question above, "
+            "do not repeat earlier answers) ---\n" + "\n\n".join(parts))
+
+
+RESUME_MAX_AGE_S = 24 * 3600     # a session older than this starts fresh (context re-injected instead)
+RESUME_MAX_TURNS = 12            # after this many continued turns the transcript is long: start fresh
+
+
+def resumable_session(cid, cwd):
+    """The session id to continue for a new question in this chat, or None."""
+    c = get_conversation(cid) if cid else None
+    if not c or not c.get("last_session_id"):
+        return None
+    if c.get("last_session_cwd") != cwd:
+        return None
+    if time.time() - (c.get("last_session_at") or 0) > RESUME_MAX_AGE_S:
+        return None
+    if (c.get("session_turns") or 0) >= RESUME_MAX_TURNS:
+        return None
+    return c["last_session_id"]
+
+
 def get_conversation(cid):
     with connect() as con:
         r = con.execute("SELECT * FROM conversations WHERE id=?", (cid,)).fetchone()
@@ -743,17 +823,18 @@ def get_schedule(sid):
         return dict(r) if r else None
 
 
-def create_schedule(name, kind, role, at_time, days, prompt="", project_dir=None, enabled=True, grace_min=180):
+def create_schedule(name, kind, role, at_time, days, prompt="", project_dir=None, enabled=True, grace_min=180,
+                    every_min=None, active_from=None, active_to=None):
     sid = str(uuid.uuid4())[:8]
     now = time.time()
     with connect() as con:
-        con.execute("INSERT INTO schedules (id, name, kind, role, prompt, project_dir, at_time, days, enabled, grace_min, created_at, updated_at) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", (sid, name, kind, role, prompt or "", project_dir, at_time, days, int(enabled), grace_min, now, now))
+        con.execute("INSERT INTO schedules (id, name, kind, role, prompt, project_dir, at_time, days, enabled, grace_min, every_min, active_from, active_to, created_at, updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (sid, name, kind, role, prompt or "", project_dir, at_time, days, int(enabled), grace_min, every_min, active_from, active_to, now, now))
     return get_schedule(sid)
 
 
 def update_schedule(sid, **fields):
-    allowed = {"name", "kind", "role", "prompt", "project_dir", "at_time", "days", "enabled", "grace_min"}
+    allowed = {"name", "kind", "role", "prompt", "project_dir", "at_time", "days", "enabled", "grace_min", "every_min", "active_from", "active_to"}
     sets = [f"{k}=?" for k in fields if k in allowed]
     vals = [int(v) if k == "enabled" else v for k, v in fields.items() if k in allowed]
     if not sets:
@@ -778,3 +859,47 @@ def schedule_runs(sid, limit=20):
         return [dict(r) for r in con.execute(
             "SELECT id, chain_id, conversation_id, status, created_at, finished_at, role FROM tasks WHERE created_by=? ORDER BY created_at DESC LIMIT ?",
             (f"schedule:{sid}", limit))]
+
+
+# ---------------------------------------------------------------- alerts ----
+
+def add_alerts(items, chain_id=None, source_default="watch"):
+    """Store watcher findings. A key already open (status new) or dismissed in the last 7 days is
+    skipped, so the same red pipeline is not reported every half hour. Returns the new rows."""
+    new = []
+    now = time.time()
+    with connect() as con:
+        for it in items or []:
+            key = (it.get("key") or "").strip()
+            if not key:
+                continue
+            dup = con.execute("SELECT 1 FROM alerts WHERE key=? AND (status='new' OR dismissed_at > ?)", (key, now - 7 * 86400)).fetchone()
+            if dup:
+                continue
+            aid = str(uuid.uuid4())[:8]
+            con.execute("INSERT INTO alerts (id, key, severity, title, detail, url, source, chain_id, status, created_at) VALUES (?,?,?,?,?,?,?,?,'new',?)",
+                        (aid, key, it.get("severity") or "info", (it.get("title") or "")[:200], it.get("detail") or "", it.get("url"),
+                         it.get("source") or source_default, chain_id, now))
+            new.append({"id": aid, **it})
+    return new
+
+
+def list_alerts(status="new", limit=50):
+    with connect() as con:
+        if status == "all":
+            rows = con.execute("SELECT * FROM alerts ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+        else:
+            rows = con.execute("SELECT * FROM alerts WHERE status=? ORDER BY CASE severity WHEN 'urgent' THEN 0 WHEN 'warn' THEN 1 ELSE 2 END, created_at DESC LIMIT ?", (status, limit)).fetchall()
+        return [dict(r) for r in rows]
+
+
+def dismiss_alert(aid=None, all_=False):
+    with connect() as con:
+        if all_:
+            return con.execute("UPDATE alerts SET status='dismissed', dismissed_at=? WHERE status='new'", (time.time(),)).rowcount
+        return con.execute("UPDATE alerts SET status='dismissed', dismissed_at=? WHERE id=?", (time.time(), aid)).rowcount
+
+
+def recent_alert_keys(limit=200):
+    with connect() as con:
+        return [r["key"] for r in con.execute("SELECT key FROM alerts ORDER BY created_at DESC LIMIT ?", (limit,))]

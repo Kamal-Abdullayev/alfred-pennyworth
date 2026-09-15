@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { api, fmtTime, type Schedule } from '../api'
 
 const DAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-type Draft = { name: string; kind: 'brief' | 'prompt'; role: string; prompt: string; project_dir: string; at_time: string; days: number[] }
-const emptyDraft = (): Draft => ({ name: 'Morning brief', kind: 'brief', role: 'briefer', prompt: '', project_dir: '', at_time: '08:00', days: [0, 1, 2, 3, 4] })
+type Draft = { name: string; kind: 'brief' | 'prompt' | 'watch'; role: string; prompt: string; project_dir: string; at_time: string; days: number[]; every_min: number; active_from: string; active_to: string }
+const emptyDraft = (): Draft => ({ name: 'Morning brief', kind: 'brief', role: 'briefer', prompt: '', project_dir: '', at_time: '08:00', days: [0, 1, 2, 3, 4], every_min: 30, active_from: '08:00', active_to: '19:00' })
 type Meta = { schedules: Schedule[]; roles: string[]; me_name: string; tz: { name: string; abbr: string; offset: string; now: string }; now: number; supervisor_alive: boolean }
 
 function until(ts: number | null | undefined, now: number) {
@@ -35,20 +35,20 @@ function DayPicker({ value, onChange }: { value: number[]; onChange: (d: number[
 function ScheduleCard({ s, meta, busy, act }: { s: Schedule; meta: Meta; busy: string | null; act: (label: string, fn: () => Promise<unknown>) => Promise<void> }) {
   const nav = useNavigate()
   const [edit, setEdit] = useState(false)
-  const [d, setD] = useState<Draft>({ name: s.name, kind: s.kind, role: s.role, prompt: s.prompt, project_dir: s.project_dir ?? '', at_time: s.at_time, days: s.days.split(',').filter(Boolean).map(Number) })
+  const [d, setD] = useState<Draft>({ name: s.name, kind: s.kind, role: s.role, prompt: s.prompt, project_dir: s.project_dir ?? '', at_time: s.at_time, days: s.days.split(',').filter(Boolean).map(Number), every_min: s.every_min ?? 30, active_from: s.active_from ?? '08:00', active_to: s.active_to ?? '19:00' })
   const days = s.days.split(',').filter(Boolean).map(Number)
   const lastLate = s.runs[0] ? lateness(s.runs[0], s) : null
   return (
     <div className={`sched ${s.enabled ? '' : 'paused'}`}>
       <div className="sched-time">
-        <div className="big">{s.at_time}</div>
+        <div className="big">{s.kind === 'watch' ? <>{s.every_min}<span style={{ fontSize: 14, fontWeight: 500, marginLeft: 3 }}>min</span></> : s.at_time}</div>
         <div className="week">{DAYS.map((dn, i) => <span key={dn} className={days.includes(i) ? 'on' : ''} title={dn}>{dn[0]}</span>)}</div>
-        <div className="muted small">{s.enabled ? until(s.next_run_at, meta.now) : 'paused'}</div>
+        <div className="muted small">{s.kind === 'watch' && <div>{s.active_from}–{s.active_to}</div>}{s.enabled ? until(s.next_run_at, meta.now) : 'paused'}</div>
       </div>
       <div className="sched-body">
         <div className="row">
           <b style={{ fontSize: 15 }}>{s.name}</b>
-          <span className={`pill ${s.kind === 'brief' ? 'answered' : ''}`}>{s.kind === 'brief' ? 'daily brief' : 'prompt'}</span>
+          <span className={`pill ${s.kind === 'brief' ? 'answered' : s.kind === 'watch' ? 'running' : ''}`}>{s.kind === 'brief' ? 'daily brief' : s.kind === 'watch' ? 'watcher' : 'prompt'}</span>
           <span className={`pill ${s.role}`}>{s.role}</span>
           {!s.enabled && <span className="pill">paused</span>}
           <span className="actions" style={{ marginLeft: 'auto' }}>
@@ -59,7 +59,7 @@ function ScheduleCard({ s, meta, busy, act }: { s: Schedule; meta: Meta; busy: s
           </span>
         </div>
         <div className="small muted" style={{ marginTop: 4 }}>
-          {s.kind === 'brief' ? 'Reads calendar, Teams, mail and Jira, writes the day on one page.' : s.prompt}
+          {s.kind === 'brief' ? 'Reads calendar, Teams, mail and Jira, writes the day on one page.' : s.kind === 'watch' ? 'Checks your merge requests, tickets, Teams and mail; new facts become alerts on Home and a macOS notification.' : s.prompt}
           {s.kind === 'brief' && s.prompt ? <> Focus: <i>{s.prompt}</i></> : null}
           {s.project_dir ? <> · <span className="mono">{s.project_dir}</span></> : null}
         </div>
@@ -67,15 +67,15 @@ function ScheduleCard({ s, meta, busy, act }: { s: Schedule; meta: Meta; busy: s
           <span className="muted">Next</span><b>{s.enabled && s.next_run_at ? fmtTime(s.next_run_at) : '—'}</b>
           <span className="muted">· Last</span>
           {s.last_run_at ? <b>{fmtTime(s.last_run_at)}</b> : <span className="muted">never</span>}
-          {lastLate !== null && lastLate > 5 && <span className="pill stuck" title="Alfred was not running at the scheduled time; the job ran when the supervisor came back, inside the grace window">late by {lastLate} min</span>}
-          {lastLate !== null && lastLate <= 5 && <span className="pill done">on time</span>}
+          {s.kind !== 'watch' && lastLate !== null && lastLate > 5 && <span className="pill stuck" title="Alfred was not running at the scheduled time; the job ran when the supervisor came back, inside the grace window">late by {lastLate} min</span>}
+          {s.kind !== 'watch' && lastLate !== null && lastLate <= 5 && <span className="pill done">on time</span>}
         </div>
         {s.runs.length > 0 && (
           <div className="runs">
             {s.runs.map((r) => {
               const late = lateness(r, s)
               return <a key={r.id} className={`run ${r.status}`} href={r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`} onClick={(e) => { e.preventDefault(); nav(r.conversation_id ? `/ask/${r.conversation_id}` : `/chains/${r.chain_id}`) }}
-                title={`${fmtTime(r.created_at)} · ${r.status}${late ? ` · ${late} min late` : ''}`}><span className="d" /> <span>{new Date(r.created_at * 1000).toLocaleDateString(undefined, { weekday: 'short' })} {new Date(r.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span className="muted">{r.status === 'done' ? (s.kind === 'brief' ? 'brief' : 'answer') : r.status}</span></a>
+                title={`${fmtTime(r.created_at)} · ${r.status}${late ? ` · ${late} min late` : ''}`}><span className="d" /> <span>{new Date(r.created_at * 1000).toLocaleDateString(undefined, { weekday: 'short' })} {new Date(r.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span className="muted">{r.status === 'done' ? (s.kind === 'brief' ? 'brief' : s.kind === 'watch' ? 'checked' : 'answer') : r.status}</span></a>
             })}
           </div>
         )}
@@ -85,12 +85,14 @@ function ScheduleCard({ s, meta, busy, act }: { s: Schedule; meta: Meta; busy: s
               <input value={d.name} onChange={(e) => setD({ ...d, name: e.target.value })} />
               <div style={{ display: 'flex', gap: 8 }}>
                 <select value={d.role} onChange={(e) => setD({ ...d, role: e.target.value })}>{meta.roles.map((r) => <option key={r}>{r}</option>)}</select>
-                <input type="time" value={d.at_time} onChange={(e) => setD({ ...d, at_time: e.target.value })} style={{ width: 120 }} />
+                {s.kind === 'watch'
+                  ? <><input type="number" min={5} step={5} value={d.every_min} onChange={(e) => setD({ ...d, every_min: Number(e.target.value) })} style={{ width: 70 }} title="every N minutes" /><input type="time" value={d.active_from} onChange={(e) => setD({ ...d, active_from: e.target.value })} style={{ width: 110 }} /><input type="time" value={d.active_to} onChange={(e) => setD({ ...d, active_to: e.target.value })} style={{ width: 110 }} /></>
+                  : <input type="time" value={d.at_time} onChange={(e) => setD({ ...d, at_time: e.target.value })} style={{ width: 120 }} />}
               </div>
             </div>
             <DayPicker value={d.days} onChange={(days) => setD({ ...d, days })} />
             <textarea value={d.prompt} onChange={(e) => setD({ ...d, prompt: e.target.value })} style={{ minHeight: 60 }} placeholder={s.kind === 'brief' ? 'optional extra focus' : 'the question'} />
-            <div><button disabled={busy !== null || d.days.length === 0} onClick={() => act('save', async () => { await api.updateSchedule(s.id, { name: d.name.trim(), role: d.role, at_time: d.at_time, days: d.days.join(','), prompt: d.prompt }); setEdit(false) })}>Save</button></div>
+            <div><button disabled={busy !== null || d.days.length === 0} onClick={() => act('save', async () => { await api.updateSchedule(s.id, { name: d.name.trim(), role: d.role, at_time: d.at_time, days: d.days.join(','), prompt: d.prompt, ...(s.kind === 'watch' ? { every_min: d.every_min, active_from: d.active_from, active_to: d.active_to } : {}) }); setEdit(false) })}>Save</button></div>
           </div>
         )}
       </div>
@@ -105,7 +107,9 @@ export default function SchedulesPage() {
   const [busy, setBusy] = useState<string | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [name, setName] = useState('')
-  const load = () => api.schedules().then((d) => { setMeta(d as Meta); setName(d.me_name) }).catch((e) => setErr(String(e)))
+  const [gl, setGl] = useState('')
+  const [settings, setSettings] = useState<Record<string, string | null>>({})
+  const load = () => Promise.all([api.schedules(), api.settings()]).then(([d, st]) => { setMeta(d as Meta); setName(d.me_name); setSettings(st); setGl(st.gitlab_username ?? '') }).catch((e) => setErr(String(e)))
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t) }, [])
   const act = async (label: string, fn: () => Promise<unknown>) => { setBusy(label); setErr(null); try { await fn(); await load() } catch (e) { setErr(String(e)) } finally { setBusy(null) } }
 
@@ -129,7 +133,10 @@ export default function SchedulesPage() {
         <span className="small">The brief addresses you as</span>
         <input value={name} onChange={(e) => setName(e.target.value)} style={{ width: 150 }} />
         <button className="secondary" disabled={busy !== null || !name.trim() || name === meta?.me_name} onClick={() => act('name', () => api.setMeName(name.trim()))}>Save</button>
-        <span className="small muted" style={{ marginLeft: 'auto' }}>Runs land in a chat like any question; the brief also appears on Home and as a printable page.</span>
+        <span className="small" style={{ marginLeft: 12 }}>GitLab username</span>
+        <input value={gl} onChange={(e) => setGl(e.target.value)} style={{ width: 170 }} className="mono" placeholder="for 'my merge requests'" />
+        <button className="secondary" disabled={busy !== null || gl === (settings.gitlab_username ?? '')} onClick={() => act('gl', () => api.setSetting('gitlab_username', gl.trim()))}>Save</button>
+        <span className="small muted" style={{ marginLeft: 'auto' }}>Runs land in a chat like any question.</span>
       </div>
 
       {adding && (
@@ -137,20 +144,23 @@ export default function SchedulesPage() {
           <div className="grid cols-2" style={{ gap: 10 }}>
             <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} placeholder="name" />
             <div style={{ display: 'flex', gap: 8 }}>
-              <select value={draft.kind} onChange={(e) => setDraft({ ...draft, kind: e.target.value as Draft['kind'], role: e.target.value === 'brief' ? 'briefer' : 'team_lead' })} style={{ width: 150 }}>
-                <option value="brief">daily brief</option><option value="prompt">prompt</option>
+              <select value={draft.kind} onChange={(e) => { const k = e.target.value as Draft['kind']; setDraft({ ...draft, kind: k, role: k === 'brief' ? 'briefer' : k === 'watch' ? 'watcher' : 'team_lead', name: k === 'watch' && draft.name === 'Morning brief' ? 'Watcher' : draft.name }) }} style={{ width: 150 }}>
+                <option value="brief">daily brief</option><option value="watch">watcher (interval)</option><option value="prompt">prompt</option>
               </select>
               <select value={draft.role} onChange={(e) => setDraft({ ...draft, role: e.target.value })}>{(meta?.roles ?? []).map((r) => <option key={r}>{r}</option>)}</select>
-              <input type="time" value={draft.at_time} onChange={(e) => setDraft({ ...draft, at_time: e.target.value })} style={{ width: 120 }} />
+              {draft.kind === 'watch'
+                ? <><span className="small muted" style={{ alignSelf: 'center' }}>every</span><input type="number" min={5} step={5} value={draft.every_min} onChange={(e) => setDraft({ ...draft, every_min: Number(e.target.value) })} style={{ width: 70 }} /><span className="small muted" style={{ alignSelf: 'center' }}>min,</span>
+                   <input type="time" value={draft.active_from} onChange={(e) => setDraft({ ...draft, active_from: e.target.value })} style={{ width: 110 }} /><span className="small muted" style={{ alignSelf: 'center' }}>–</span><input type="time" value={draft.active_to} onChange={(e) => setDraft({ ...draft, active_to: e.target.value })} style={{ width: 110 }} /></>
+                : <input type="time" value={draft.at_time} onChange={(e) => setDraft({ ...draft, at_time: e.target.value })} style={{ width: 120 }} />}
             </div>
           </div>
           <DayPicker value={draft.days} onChange={(days) => setDraft({ ...draft, days })} />
           <textarea value={draft.prompt} onChange={(e) => setDraft({ ...draft, prompt: e.target.value })} style={{ minHeight: 70 }}
-            placeholder={draft.kind === 'brief' ? 'optional extra focus for the brief, e.g. "watch the 2FA epic and anything from Zeynep"' : 'the question to ask, e.g. "Which of my open MRs have a red pipeline this morning, and why?"'} />
+            placeholder={draft.kind === 'brief' ? 'optional extra focus for the brief, e.g. "watch the 2FA epic and anything from Zeynep"' : draft.kind === 'watch' ? 'optional extra focus, e.g. "also watch pipelines on excite/applications/session-proxy master"' : 'the question to ask, e.g. "Which of my open MRs have a red pipeline this morning, and why?"'} />
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <input className="mono" value={draft.project_dir} onChange={(e) => setDraft({ ...draft, project_dir: e.target.value })} placeholder="repository path (optional, for prompts about local code)" />
             <button disabled={busy !== null || !draft.name.trim() || draft.days.length === 0 || (draft.kind === 'prompt' && !draft.prompt.trim())}
-              onClick={() => act('create', async () => { await api.createSchedule({ ...draft, project_dir: draft.project_dir || null, days: draft.days.join(',') }); setAdding(false); setDraft(emptyDraft()) })}>Create</button>
+              onClick={() => act('create', async () => { await api.createSchedule({ ...draft, project_dir: draft.project_dir || null, days: draft.days.join(','), every_min: draft.kind === 'watch' ? draft.every_min : null, active_from: draft.kind === 'watch' ? draft.active_from : null, active_to: draft.kind === 'watch' ? draft.active_to : null }); setAdding(false); setDraft(emptyDraft()) })}>Create</button>
           </div>
         </div>
       )}

@@ -94,7 +94,12 @@ class Supervisor:
         self.reap()
         self.recycle_stale(board.workers())
         try:
-            import schedules
+            import importlib, schedules
+            mt = (ROOT / "schedules.py").stat().st_mtime
+            if getattr(self, "_sched_mtime", None) not in (None, mt):
+                importlib.reload(schedules)
+                flow("[schedule] schedules.py changed — reloaded")
+            self._sched_mtime = mt
             schedules.tick()
         except Exception as e:  # noqa: BLE001 — a bad schedule must not stop the workers
             flow(f"[schedule] tick failed: {e!r}")

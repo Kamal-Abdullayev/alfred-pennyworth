@@ -317,3 +317,9 @@ table.compact td { padding: 5px 8px; } tr.link { cursor: pointer; } tr.link:hove
 .agenda .ev .chip b { font-family: var(--mono); font-weight: 600; font-size: 11px; color: var(--accent); }
 .agenda .ev .ev-t { font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--fg); }
 .agenda .ev.past { opacity: .45; } .agenda .ev.live .chip { border-color: var(--run); box-shadow: 0 0 0 2px color-mix(in srgb, var(--run) 30%, transparent); }
+
+/* ---- alerts (Home) ---- */
+.alert { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; border-top: 1px solid var(--border); } .alert:first-of-type { border-top: 0; }
+.alert .sev { width: 8px; height: 8px; border-radius: 4px; margin-top: 6px; flex: 0 0 8px; background: var(--muted); }
+.alert.warn .sev { background: var(--warn); } .alert.urgent .sev { background: var(--bad); box-shadow: 0 0 8px var(--bad); }
+.alert .body { min-width: 0; flex: 1; } .alert .t { font-weight: 600; font-size: 13px; } .alert .s { font-size: 12.5px; color: var(--muted); line-height: 1.45; margin-top: 2px; } .alert .m { font-size: 11px; margin-top: 3px; }
