@@ -6,7 +6,7 @@ export type Task = {
   iteration: number; created_by: string; claimed_by: string | null
   created_at: number; claimed_at: number | null; finished_at: number | null
 }
-export type Kind = 'plan' | 'answer' | 'brief'
+export type Kind = 'plan' | 'answer' | 'brief' | 'watch'
 export type Chain = {
   chain_id: string; title: string; status: 'running' | 'passed' | 'failed' | 'stuck' | 'done' | 'answered' | string
   kind: Kind
@@ -61,7 +61,8 @@ export type HomeData = {
     tasks: { id: string; role: string; title: string; status: string; iteration: number; claimed_by: string | null; claimed_at: number | null; created_at: number; finished_at: number | null }[] }[]
   jira_url: string | null
   by_day: { day: string; role: string; cost: number; runs: number }[]
-  recent_chains: Chain[]; need_human: Chain[]
+  recent_chains: Chain[]; need_human: Chain[]; failed_scheduled: Chain[]
+  flows: Flow[]
   todos: { id: string; kind: string; title: string; project_key: string }[]
   conversations: Conversation[]
   me_name: string
@@ -79,6 +80,8 @@ export type BriefDoc = { date: string; headline: string; segments: BriefItem[]; 
   unread_emails: { sender: string; subject: string; when: string; count: number }[]; footer: string | null }
 export type BriefRun = { task_id: string; chain_id: string; conversation_id: string | null; status: string; created_at: number; finished_at: number | null; cost_usd: number; brief: BriefDoc }
 export type BriefLatest = { latest: BriefRun | null; running: { id: string; chain_id: string; status: string; created_at: number } | null }
+export type FlowTask = { id: string; role: string; title: string; status: string; iteration: number; claimed_by: string | null; claimed_at: number | null; created_at: number; finished_at: number | null }
+export type Flow = { chain_id: string; title: string; tickets: string[]; project: string | null; conversation_id: string | null; started_at: number; finished_at: number | null; cost_usd: number; status: string; kind: Kind; verdict: string | null; tasks: FlowTask[] }
 export type Alert = { id: string; key: string; severity: 'info' | 'warn' | 'urgent'; title: string; detail: string; url: string | null; source: string | null; chain_id: string | null; status: string; created_at: number }
 export type TaskNote = { id: number; task_id: string; chain_id: string; role: string; note: string; created_at: number }
 
@@ -116,7 +119,7 @@ export type LogEntry = { id: number; connector: string; level: 'info' | 'warn' |
 export type TranscriptEvent = { ts: string; kind: string; data: Record<string, unknown> }
 export type Transcript = { task_id: string; source: string | null; count: number; kinds: Record<string, number>; events: TranscriptEvent[] }
 export type LogFile = { name: string; bytes: number; mtime: number }
-export type Conversation = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: number; cost_usd: number; last_status: string | null }
+export type Conversation = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: number; cost_usd: number; last_status: string | null; scheduled?: number }
 export type ConversationTurn = { chain_id: string; question: string; status: string; kind: Kind; created_at: number; finished_at: number | null; cost_usd: number; structured: unknown | null; result: string | null; drew?: boolean; resumed?: boolean }
 export type ConversationDetail = { id: string; title: string; project_dir: string | null; created_at: number; updated_at: number; turns: ConversationTurn[] }
 export type Connector = {

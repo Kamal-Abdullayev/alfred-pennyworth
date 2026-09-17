@@ -52,11 +52,14 @@ def notify(title: str, text: str, url: str | None = None) -> None:
             r = subprocess.run([tn, "-title", str(title)[:80], "-message", str(text)[:240], "-open", url, "-group", "alfred", "-sound", "Glass"],
                                capture_output=True, text=True, timeout=5)
             try:
-                board.set_setting("notify_status", json.dumps({"ok": r.returncode == 0, "at": time.time(), "code": r.returncode}))
+                # only exit 3 means macOS blocks the app; other codes are one-off delivery hiccups
+                board.set_setting("notify_status", json.dumps({"ok": r.returncode != 3, "at": time.time(), "code": r.returncode}))
             except Exception:
                 pass
             if r.returncode == 0:
                 return
+            if r.returncode != 3:
+                flow(f"[notify] terminal-notifier exit {r.returncode}: {(r.stderr or r.stdout or '').strip()[:120]}")
             # exit 3 = "Notifications are turned off for this application": fall through to osascript so the
             # alert is not lost, and say so once in the flow log
             if not getattr(notify, "_warned", False):

@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { NavLink, Route, Routes, useLocation } from 'react-router-dom'
-import Dashboard from './pages/Dashboard'
 import Home from './pages/Home'
 import Ask from './pages/Ask'
 import ChainPage from './pages/Chain'
@@ -41,7 +40,6 @@ export default function App() {
       <nav>
         <div className="brand">Alfred</div>
         <NavLink to="/" end>Home</NavLink>
-        <NavLink to="/board">Board</NavLink>
         <NavLink to="/ask">Ask</NavLink>
         <NavLink to="/agents">Agents</NavLink>
         <NavLink to="/memory">Memory</NavLink>
@@ -53,7 +51,6 @@ export default function App() {
       <main>
         <Routes>
           <Route path="/" element={<Home />} />
-          <Route path="/board" element={<Dashboard />} />
           <Route path="/ask" element={<Ask />} />
           <Route path="/ask/:cid" element={<Ask />} />
           <Route path="/chains/:id" element={<ChainPage />} />

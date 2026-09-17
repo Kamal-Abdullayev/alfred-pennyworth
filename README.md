@@ -24,7 +24,7 @@ claude                     # first time only: /login with your Team account, the
 ```
 
 `setup.sh` ends with a preflight table (`python doctor.py` any time). `run_all.sh` refuses to
-start while a required check fails, and the Dashboard shows the same problems with the fix
+start while a required check fails, and Home shows the same problems with the fix
 for each. Do **not** set `ANTHROPIC_API_KEY` — the runner refuses to start if it is set,
 because it would bill API rates instead of your seat.
 
@@ -47,8 +47,8 @@ Then, in the UI:
 
 | Page | What it is |
 |---|---|
+| **Home** | Today's brief, what needs your attention (alerts, stuck chains, proposals), meetings and tickets, what the agents are doing, and the chat box. |
 | **Ask** | Chat with the team lead. Live steps while it works, then the answer with verbatim code refs (open in IntelliJ / GitLab), Mermaid diagrams, citations, confidence, per-turn cost. **■ stop** interrupts a running turn. `remember: …` stores a fact in project memory, `remember globally: …` for all projects. Proposed memory entries can be accepted right in the chat. |
-| **Dashboard** | Live board, every chain with status and cost, flow log, setup problems. |
 | **Chain page** | Plan → implementation → QA verdict timeline, findings, the full diff (committed or not), transcripts, per-turn tokens, human actions (requeue, close, dispatch, stop, send a finding back). |
 | **Memory** | Shared project memory: decisions, facts, conventions, glossary, people, open questions — per repository (keyed by git remote, so two clones share it) plus global. Agents and meeting-notes intakes can only **propose**; you accept, edit, retire. **Paste meeting notes** → the lead distils them into proposals. Exported as Markdown under `data/memory/`. |
 | **Agents** | Edit each role's YAML from the UI; add roles by cloning; see live workers and the global cap. |
@@ -82,7 +82,7 @@ tools are denied unless you trust a connector's writes.
 ## Layout
 
 ```
-setup.sh / doctor.py   one-time setup and preflight (also /api/doctor → Dashboard banner)
+setup.sh / doctor.py   one-time setup and preflight (also /api/doctor → banner on Home)
 run_all.sh             preflight, build UI if needed, start supervisor + API on :8787
 agents/                one YAML per role (model, prompt, tools, contract, workers)
 contracts.py           typed handoff contracts (lead / plan / implement / review / answer / memory proposals)
@@ -139,7 +139,7 @@ messages by that weight, so it always adds up to the run figure.
 
 | Symptom | Cause / fix |
 |---|---|
-| Dashboard shows a red setup banner | Same as `python doctor.py`; each line has the fix. |
+| Home shows a red setup banner | Same as `python doctor.py`; each line has the fix. |
 | "ANTHROPIC_API_KEY is set" on start | Unset it; Alfred must run on your login, not an API key. |
 | UI looks old after a pull | `(cd ui && npm run build)`; the UI shows a reload banner when the served bundle changed. |
 | A chain is *stuck* | Open it: requeue, close, or send a finding back to the developer. |

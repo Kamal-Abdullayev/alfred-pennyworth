@@ -49,12 +49,14 @@ def _kind(root: dict) -> str:
         return "plan"
     if "headline" in s and "segments" in s:
         return "brief"
+    if "items" in s and "checked" in s:
+        return "watch"
     return s.get("kind") or ("plan" if "subtasks" in s else "plan")
 
 
 def _chain_status(tasks: list[dict]) -> str:
     root = tasks[0]
-    if _kind(root) in ("answer", "brief") and root["status"] == "done":
+    if _kind(root) in ("answer", "brief", "watch") and root["status"] == "done":
         return "answered"
     statuses = {t["status"] for t in tasks}
     if root["status"] == "cancelled" or ("cancelled" in statuses and not (statuses & {"open", "claimed", "stuck", "done"})):
@@ -952,6 +954,28 @@ def home():
                            "project": Path(root["project_dir"]).name if root.get("project_dir") else None, "conversation_id": root.get("conversation_id"),
                            "started_at": root.get("created_at"), "cost_usd": board.chain_cost(cid) or 0.0,
                            "subtasks": len((plan or {}).get("subtasks") or []) if plan else None, "tasks": rows})
+    # recent flows: the last few human chains (running or finished) with every task, so the Home page
+    # can draw lead → developers → QA → result for each
+    def _flow(c: dict):
+        cid = c["chain_id"]
+        with board.connect() as con:
+            rows = [dict(r) for r in con.execute("SELECT id, role, title, status, iteration, claimed_by, claimed_at, created_at, finished_at, structured FROM tasks WHERE chain_id=? ORDER BY created_at", (cid,))]
+            root = dict(con.execute("SELECT id, title, question, project_dir, conversation_id, created_at, created_by FROM tasks WHERE id=?", (cid,)).fetchone() or {})
+        if not root or str(root.get("created_by", "")).startswith("schedule:"):
+            return None
+        verdict = None
+        for t in reversed(rows):
+            if t["role"] == "qa" and t["status"] == "done":
+                st = t.get("structured"); st = json.loads(st) if isinstance(st, str) and st else st
+                verdict = (st or {}).get("verdict"); break
+        for t in rows:
+            t.pop("structured", None)
+        text = f"{root.get('question') or ''} {root.get('title') or ''}"
+        return {"chain_id": cid, "title": (root.get("question") or root.get("title") or "")[:160],
+                "tickets": list(dict.fromkeys(_re.findall(r"\b[A-Z][A-Z0-9]{1,9}-\d{2,7}\b", text))),
+                "project": Path(root["project_dir"]).name if root.get("project_dir") else None, "conversation_id": root.get("conversation_id"),
+                "started_at": root.get("created_at"), "finished_at": max((t.get("finished_at") or 0) for t in rows) or None,
+                "cost_usd": c.get("cost_usd") or 0.0, "status": c["status"], "kind": c["kind"], "verdict": verdict, "tasks": rows}
     workers = board.workers()
     live = []
     for w in workers:
@@ -959,15 +983,20 @@ def home():
         live.append({"pid": w["pid"], "role": w["role"], "ephemeral": bool(w.get("ephemeral")), "since": w.get("started_at"),
                      "task": ({"id": t["id"], "chain_id": t["chain_id"], "title": t["title"], "chain_title": titles.get(t["chain_id"], t["title"]),
                                "claimed_at": t["claimed_at"], "project_dir": t["project_dir"]} if t else None)})
-    chains = _chains(60)
-    need = [c for c in chains if c["status"] in ("stuck", "not_dispatched", "failed")]
+    chains = _chains(80)
+    with board.connect() as con:
+        scheduled = {r["chain_id"] for r in con.execute("SELECT chain_id FROM tasks WHERE id = chain_id AND created_by LIKE 'schedule:%'")}
+    human_chains = [c for c in chains if c["chain_id"] not in scheduled]
+    need = [c for c in human_chains if c["status"] in ("stuck", "not_dispatched", "failed")]
+    failed_sched = [c for c in chains if c["chain_id"] in scheduled and c["status"] == "failed" and now - c["updated_at"] < 86400]
     return {
         "now": now,
         "stats": {"working": sum(1 for t in tasks_ if t["status"] == "claimed"), "queued": sum(1 for t in tasks_ if t["status"] == "open"),
                   "workers": len(workers), "need_human": len(need), "today_cost": today_cost["c"], "today_runs": today_cost["n"],
                   "week_cost": week_cost["c"], "week_runs": week_cost["n"], "proposals": proposals},
         "workers": live, "queue": [t for t in tasks_ if t["status"] == "open"][:8], "active": active, "jira_url": _jira_url(),
-        "by_day": by_day, "recent_chains": chains[:8], "need_human": need[:8], "todos": todos,
+        "by_day": by_day, "recent_chains": human_chains[:6], "need_human": need[:8], "failed_scheduled": failed_sched[:3], "todos": todos,
+        "flows": [f for f in (_flow(c) for c in human_chains[:6]) if f],
         "conversations": board.list_conversations(limit=6),
         "me_name": __import__("schedules").me_name(),
         "brief_schedule": next((sc for sc in board.list_schedules() if sc["kind"] == "brief"), None),

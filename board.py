@@ -599,7 +599,8 @@ def list_conversations(limit=100):
             " (SELECT COUNT(*) FROM tasks t WHERE t.conversation_id=c.id AND t.role='team_lead') AS turns, "
             " (SELECT COALESCE(SUM(u.cost_usd),0) FROM usage u WHERE u.chain_id IN "
             "   (SELECT t.chain_id FROM tasks t WHERE t.conversation_id=c.id)) AS cost_usd, "
-            " (SELECT t.status FROM tasks t WHERE t.conversation_id=c.id AND t.role='team_lead' ORDER BY t.created_at DESC LIMIT 1) AS last_status "
+            " (SELECT t.status FROM tasks t WHERE t.conversation_id=c.id AND t.role='team_lead' ORDER BY t.created_at DESC LIMIT 1) AS last_status, "
+            " (SELECT COUNT(*) FROM tasks t WHERE t.conversation_id=c.id AND t.created_by LIKE 'schedule:%') AS scheduled "
             "FROM conversations c ORDER BY c.updated_at DESC LIMIT ?", (limit,)).fetchall()
         return [dict(r) for r in rows]
 
