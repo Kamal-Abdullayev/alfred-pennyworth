@@ -123,9 +123,50 @@ function Proposals({ items, onChange }: { items: Memory[]; onChange: () => void 
   )
 }
 
+const ROLE_COLOR: Record<string, string> = { team_lead: '#bb9af7', developer: '#7aa2f7', qa: '#9ece6a' }
+const el = (since: number | null | undefined) => { if (!since) return ''; const s = Math.max(0, Math.floor(Date.now() / 1000 - since)); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` }
+
+/** What the developers and QA are doing on a dispatched plan, live, inside the chat. */
+function ChainProgress({ d, chainId }: { d: ChainDetail; chainId: string }) {
+  const tasks = d.tasks.filter((t) => t.id !== chainId)
+  const active = tasks.some((t) => t.status === 'open' || t.status === 'claimed')
+  const qa = [...tasks].reverse().find((t) => t.role === 'qa' && t.status === 'done')
+  const verdict = (() => { const s = qa?.structured; const o = typeof s === 'string' ? (s ? JSON.parse(s) : null) : s; return (o as { verdict?: string } | null)?.verdict })()
+  const files = new Set((d.diff ?? '').split('\n').filter((l) => l.startsWith('+++ b/')).map((l) => l.slice(6))).size
+  const adds = (d.diff ?? '').split('\n').filter((l) => l.startsWith('+') && !l.startsWith('+++')).length
+  const dels = (d.diff ?? '').split('\n').filter((l) => l.startsWith('-') && !l.startsWith('---')).length
+  const short = (t: string) => t.replace(/^(implement|verify|fix): /, '')
+  return (
+    <div className="progress">
+      <div className="small muted" style={{ margin: '10px 0 6px' }}>{active ? 'Developers and QA are working — this updates live.' : d.status === 'passed' ? 'Done. QA passed.' : d.status === 'failed' ? 'Ended with a failure.' : d.status === 'stuck' ? 'Stuck — a decision is needed on the chain page.' : 'Finished.'}</div>
+      <div className="plist">
+        {tasks.map((t) => (
+          <div key={t.id} className={`prow ${t.status}`}>
+            <span className={`pill ${t.role}`}>{t.role}{t.iteration > 1 ? ` r${t.iteration}` : ''}</span>
+            <span className="ptitle" title={t.title}>{short(t.title)}</span>
+            <span className="pstate">{t.status === 'claimed' ? <><span className="dot think live" style={{ background: ROLE_COLOR[t.role] ?? 'var(--muted)' }} /> working {el(t.claimed_at)}</> : t.status === 'done' ? <span style={{ color: 'var(--ok)' }}>✓ done{t.finished_at && t.claimed_at ? ` in ${el(t.claimed_at + (Date.now() / 1000 - t.finished_at))}` : ''}</span> : t.status === 'open' ? 'queued' : <span style={{ color: 'var(--bad)' }}>{t.status}</span>}</span>
+          </div>
+        ))}
+      </div>
+      {d.notes.length > 0 && (
+        <div className="pnotes small">
+          {d.notes.slice(-3).map((n) => <div key={n.id}><span className={`pill ${n.role}`}>{n.role}</span> <span className="muted">{new Date(n.created_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span> {n.note}</div>)}
+        </div>
+      )}
+      <div className="small" style={{ marginTop: 8, display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
+        {d.diff && <span><b>{files}</b> file{files === 1 ? '' : 's'} changed <span style={{ color: 'var(--ok)' }}>+{adds}</span> <span style={{ color: 'var(--bad)' }}>−{dels}</span>{active ? ' so far' : ''}</span>}
+        {verdict && <span>QA verdict: <span className={`pill ${verdict}`}>{verdict}</span>{d.findings.length ? ` · ${d.findings.length} finding${d.findings.length === 1 ? '' : 's'}` : ''}</span>}
+        <a href={`/chains/${chainId}`}>{active ? 'watch the chain' : 'review the diff and findings'} →</a>
+      </div>
+    </div>
+  )
+}
+
 function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onStop }: { turn: ConversationTurn; live: Live; onNeedEvents: () => void; onNeedDetail: () => void; canvasUrl: string; onStop: () => Promise<void> }) {
   const [stopping, setStopping] = useState(false)
   const [showSteps, setShowSteps] = useState(false)
+  const chainActive = !!live.detail && live.detail.tasks.some((t) => t.id !== turn.chain_id && (t.status === 'open' || t.status === 'claimed'))
+  useEffect(() => { if (!chainActive) return; const t = setInterval(onNeedDetail, 10000); return () => clearInterval(t) }, [chainActive, onNeedDetail])
   const steps = toSteps(live.events)
   const finished = ['done', 'failed', 'stuck', 'cancelled', 'closed'].includes(turn.status) || !!live.detail
   const running = !finished && !live.error
@@ -164,8 +205,8 @@ function AssistantTurn({ turn, live, onNeedEvents, onNeedDetail, canvasUrl, onSt
           {dispatched
             ? <div className="small" style={{ marginBottom: 6 }}><span className="pill plan">plan</span> This is work, not a question — the lead split it into {lead.plan.subtasks.length} subtask(s) and handed them to developers.</div>
             : <div className="small" style={{ marginBottom: 6 }}><span className="pill stuck">plan · not dispatched</span> The lead produced a {lead.plan.subtasks.length}-subtask plan but <b>no repository was given</b>, so no developers were started. To implement it, ask again with the repository path filled in below.</div>}
-          <PlanContent p={lead.plan} />
-          {dispatched && <div className="small">Follow the developers and QA on the <a href={`/chains/${turn.chain_id}`}>chain page</a>.</div>}
+          <details className="plan-details"><summary className="small">the plan · {lead.plan.subtasks.length} subtask{lead.plan.subtasks.length === 1 ? '' : 's'}</summary><PlanContent p={lead.plan} /></details>
+          {dispatched && live.detail && <ChainProgress d={live.detail} chainId={turn.chain_id} />}
         </div>
       ) })()}
       {finished && turn.status === 'cancelled' && <div className="small" style={{ color: 'var(--warn)', marginTop: 6 }}>■ stopped by you{turn.result?.includes('before start') ? ' before it started' : ''} — cost so far {fmtCost(live.detail?.cost_usd ?? turn.cost_usd)}</div>}
@@ -185,6 +226,8 @@ export default function Ask() {
   const [text, setText] = useState('')
   const [project, setProject] = useState(() => { try { return localStorage.getItem(PROJECT_KEY) ?? '' } catch { return '' } })
   const [busy, setBusy] = useState(false)
+  const [showSched, setShowSched] = useState(false)
+  const [showRepo, setShowRepo] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const [canvas, setCanvas] = useState<{ url: string; configured: boolean }>({ url: 'http://localhost:3000', configured: false })
   const closers = useRef<Record<string, () => void>>({})
@@ -264,27 +307,54 @@ export default function Ask() {
     await api.deleteConversation(cid); loadConvs(); nav('/ask')
   }
 
+  const humanConvs = convs.filter((c) => !c.scheduled)
+  const schedConvs = convs.filter((c) => !!c.scheduled)
+  const shownConvs = showSched ? convs : humanConvs
+  const suggestions = [
+    'Review my open merge requests and tell me what blocks each one',
+    'Explain the login flow in session-proxy from the first request to the session cookie',
+    'What changed on my Jira tickets since yesterday?',
+  ]
+
   return (
     <div className="ask-layout">
       <aside className="convs">
-        <button style={{ width: '100%', marginBottom: 10 }} onClick={() => nav('/ask')}>+ New chat</button>
+        <button style={{ width: '100%', marginBottom: 6 }} onClick={() => nav('/ask')}>+ New chat</button>
         {convs.length === 0 && <div className="muted small" style={{ padding: 8 }}>no conversations yet</div>}
-        {convs.map((c) => (
+        {humanConvs.length > 0 && <div className="grp"><span>Chats</span></div>}
+        {shownConvs.filter((c) => !c.scheduled).map((c) => (
           <a key={c.id} className={`conv ${c.id === cid ? 'active' : ''}`} href={`/ask/${c.id}`} onClick={(e) => { e.preventDefault(); nav(`/ask/${c.id}`) }}>
             <div className="t">{c.title}</div>
             <div className="m">{c.turns} turn{c.turns === 1 ? '' : 's'} · {fmtCost(c.cost_usd)} · {ago(c.updated_at)}{c.last_status === 'claimed' || c.last_status === 'open' ? ' · working' : ''}</div>
           </a>
         ))}
+        {schedConvs.length > 0 && (
+          <div className="grp"><span>Scheduled runs · {schedConvs.length}</span><button onClick={() => setShowSched(!showSched)}>{showSched ? 'hide' : 'show'}</button></div>
+        )}
+        {showSched && schedConvs.map((c) => (
+          <a key={c.id} className={`conv sched ${c.id === cid ? 'active' : ''}`} href={`/ask/${c.id}`} onClick={(e) => { e.preventDefault(); nav(`/ask/${c.id}`) }}>
+            <div className="t">{c.title}</div>
+            <div className="m">{fmtCost(c.cost_usd)} · {ago(c.updated_at)}{c.last_status === 'claimed' || c.last_status === 'open' ? ' · running' : ''}</div>
+          </a>
+        ))}
       </aside>
-      <div>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
-          <h1 style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cid ? title || '…' : 'Ask'}</h1>
-          {cid && <span className="actions"><a className="btn-link" href={`/ask/${cid}/export`} target="_blank" rel="noreferrer" title="Printable page of the whole chat — save as PDF or download Markdown">export</a><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay on the board">forget</button></span>}
-        </div>
-        {err && <p className="err">{err}</p>}
+      <div className="ask-main">
+        {cid && (
+          <div className="ask-head">
+            <h1 title={title}>{title || '…'}</h1>
+            <span className="actions"><a className="btn-link" href={`/ask/${cid}/export`} target="_blank" rel="noreferrer" title="Printable page of the whole chat — save as PDF or download Markdown">export</a><button className="btn-link" onClick={rename}>rename</button><button className="btn-link" onClick={forget} title="Removes it from this list; the chains stay">forget</button></span>
+          </div>
+        )}
+        {err && <p className="err" style={{ maxWidth: 900, margin: '0 auto 8px', width: '100%' }}>{err}</p>}
         <CanvasConnection url={canvas.url} configured={canvas.configured} />
         <div className="chat">
-          {!cid && <div className="card muted small">Ask the team lead anything about your systems — a ticket, a merge request, how something works, why a pipeline is red. You'll see what it reads and runs while it works, then the answer with the code it relied on. Give a repository path below if the question is about local code; otherwise it reads through GitLab. Follow-ups in the same conversation carry the earlier answers as context.</div>}
+          {!cid && turns.length === 0 && remembered.length === 0 && (
+            <div className="welcome">
+              <h2>What can I look into for you?</h2>
+              <div className="muted">Tickets, merge requests, pipelines, how something works. I show what I read while I work, then answer with the exact code and sources. Attach a repository when you want changes made.</div>
+              <div className="sug">{suggestions.map((q) => <button key={q} onClick={() => setText(q)}>{q}</button>)}</div>
+            </div>
+          )}
           {turns.map((t) => (
             <div key={t.chain_id} style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               <div className="bubble user">{t.question}<div className="meta">{new Date(t.created_at * 1000).toLocaleString()} · <a href={`/chains/${t.chain_id}`} className="mono">{t.chain_id}</a></div></div>
@@ -302,14 +372,14 @@ export default function Ask() {
         </div>
         <div className="composer">
           <div className="inner">
-            <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder={cid ? 'Continue the conversation… (Enter to send, Shift+Enter for a new line; "remember: …" stores a memory for this project, "remember globally: …" for all)' : 'Ask the team lead… (Enter to send, Shift+Enter for a new line; "remember: …" stores a memory for this project, "remember globally: …" for all)'}
-              onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send() } }} />
-            {!project.trim() && <div className="small" style={{ color: 'var(--warn)', margin: '2px 2px 0' }}>no repository attached — the lead can only answer; paste a local checkout path below (or mention it in the message) for developers to apply changes</div>}
-            <div className="bar">
-              <input className="mono" value={project} onChange={(e) => setProject(e.target.value)} placeholder="repository path (optional) — /Users/you/Desktop/projects/payment-service"
-                style={project.trim() ? {} : { borderColor: 'var(--warn)' }} title={project.trim() ? 'developers work in a private worktree of this checkout' : 'no repository attached: the lead can answer and read, but developers cannot change anything'} />
-              <button onClick={send} disabled={busy || !text.trim()}>{busy ? 'Sending…' : 'Send'}</button>
+            <div className="line">
+              <textarea rows={1} value={text} onChange={(e) => setText(e.target.value)} placeholder={cid ? 'Continue the conversation…' : 'Ask Alfred anything… (“remember: …” stores a fact)'}
+                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (!busy) send() } }} />
+              <button className="repo-toggle" onClick={() => setShowRepo(!showRepo)} style={project.trim() ? { color: 'var(--accent)', borderColor: 'var(--accent)' } : {}}
+                title={project.trim() ? project : 'no repository attached — the lead can answer and read, but developers cannot change anything'}>{project.trim() ? 'repo ✓' : 'repo'}</button>
+              <button onClick={send} disabled={busy || !text.trim()}>{busy ? '…' : 'Send'}</button>
             </div>
+            {showRepo && <input className="mono" value={project} onChange={(e) => setProject(e.target.value)} placeholder="repository path — needed for changes, not for questions" autoFocus />}
           </div>
         </div>
       </div>
